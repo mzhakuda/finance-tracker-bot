@@ -23,9 +23,14 @@ type TbAPI interface {
 type TbKeyboards interface {
 	GetMainKeyboard() tbapi.ReplyKeyboardMarkup
 	GetCategoryKeyboard(userID int64) tbapi.InlineKeyboardMarkup
+	GetCategoryPickKeyboard(userID int64) tbapi.InlineKeyboardMarkup
 	GetCategoriesManagementKeyboard(userID int64) tbapi.InlineKeyboardMarkup
 	GetSpendingsManagementKeyboard(userID int64, limit int) tbapi.InlineKeyboardMarkup
+	GetBudgetCategoryKeyboard(userID int64) tbapi.InlineKeyboardMarkup
+	GetBudgetsManagementKeyboard(userID int64) tbapi.InlineKeyboardMarkup
 	GetSkipKeyboard() tbapi.ReplyKeyboardMarkup
+	GetDateKeyboard() tbapi.ReplyKeyboardMarkup
+	GetEditSpendingFieldKeyboard() tbapi.InlineKeyboardMarkup
 	IsReservedActionLabel(text string) bool
 }
 
@@ -38,6 +43,7 @@ type CategoriesRepository interface {
 	AddOrUpdateCategory(info storage.CategoryInfo) error
 	ListCategories(userID int64) ([]storage.CategoryInfo, error)
 	GetCategoryForUser(userID, categoryID int64) (*storage.CategoryInfo, error)
+	UpdateCategoryByID(userID, categoryID int64, newName, newEmoji string) error
 	DeleteCategory(userID, categoryID int64) error
 }
 
@@ -45,8 +51,19 @@ type SpendingsRepository interface {
 	AddSpending(info storage.SpendingInfo) error
 	ListSpendings(userID int64) ([]storage.SpendingInfo, error)
 	RecentSpendings(userID int64, limit int) ([]storage.SpendingDisplay, error)
+	AllSpendingsWithCategory(userID int64) ([]storage.SpendingDisplay, error)
+	GetSpendingForUser(userID, spendingID int64) (*storage.SpendingInfo, error)
+	UpdateSpending(userID, spendingID int64, update storage.SpendingUpdate) error
 	TotalSince(userID int64, since time.Time) ([]storage.CurrencyTotal, error)
+	TotalSinceForCategory(userID, categoryID int64, since time.Time) ([]storage.CurrencyTotal, error)
 	DeleteSpending(userID, spendingID int64) error
+}
+
+type BudgetsRepository interface {
+	SetBudget(info storage.BudgetInfo) error
+	ListBudgets(userID int64) ([]storage.BudgetInfo, error)
+	GetBudgetForCategory(userID, categoryID int64) (*storage.BudgetInfo, error)
+	DeleteBudget(userID, budgetID int64) error
 }
 
 type CommandHandler interface {

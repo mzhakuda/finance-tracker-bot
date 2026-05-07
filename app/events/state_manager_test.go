@@ -3,6 +3,7 @@ package events
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseAmount_Valid(t *testing.T) {
@@ -168,6 +169,58 @@ func TestReadAmountFromState_FallsBackToRaw(t *testing.T) {
 	}
 	if v != 10 || c != "EUR" {
 		t.Fatalf("got %v %s", v, c)
+	}
+}
+
+func TestParseDate(t *testing.T) {
+	ref := time.Date(2026, time.May, 7, 14, 30, 0, 0, time.UTC)
+
+	cases := []struct {
+		name string
+		in   string
+		want time.Time
+	}{
+		{"today-label", "Today", time.Date(2026, time.May, 7, 12, 0, 0, 0, time.UTC)},
+		{"today-lower", "today", time.Date(2026, time.May, 7, 12, 0, 0, 0, time.UTC)},
+		{"yesterday", "Yesterday", time.Date(2026, time.May, 6, 12, 0, 0, 0, time.UTC)},
+		{"dd.mm.yyyy", "15.04.2026", time.Date(2026, time.April, 15, 12, 0, 0, 0, time.UTC)},
+		{"dd.mm-no-year", "15.04", time.Date(2026, time.April, 15, 12, 0, 0, 0, time.UTC)},
+		{"iso", "2026-04-15", time.Date(2026, time.April, 15, 12, 0, 0, 0, time.UTC)},
+		{"dd/mm", "15/04", time.Date(2026, time.April, 15, 12, 0, 0, 0, time.UTC)},
+		{"future-shortform-rolls-back", "15.12", time.Date(2025, time.December, 15, 12, 0, 0, 0, time.UTC)},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseDate(tc.in, ref)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !got.Equal(tc.want) {
+				t.Fatalf("got %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseDate_Invalid(t *testing.T) {
+	ref := time.Date(2026, time.May, 7, 14, 30, 0, 0, time.UTC)
+	for _, in := range []string{"", "  ", "tomorrow", "32.13.2026", "1999-01-01", "abc"} {
+		if _, err := parseDate(in, ref); err == nil {
+			t.Fatalf("expected error for %q", in)
+		}
+	}
+}
+
+func TestReadDateFromState_DefaultsToRefDay(t *testing.T) {
+	ref := time.Date(2026, time.May, 7, 9, 0, 0, 0, time.UTC)
+	got, err := readDateFromState(map[string]interface{}{}, ref)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := time.Date(2026, time.May, 7, 12, 0, 0, 0, time.UTC)
+	if !got.Equal(want) {
+		t.Fatalf("got %s, want %s", got, want)
 	}
 }
 

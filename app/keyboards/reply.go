@@ -13,6 +13,12 @@ const (
 // SkipDescriptionLabel is the label of the inline reply button used to omit a spending description.
 const SkipDescriptionLabel = "Skip"
 
+// Date keyboard labels used when prompting for a spending date.
+const (
+	DateLabelToday     = "Today"
+	DateLabelYesterday = "Yesterday"
+)
+
 // ActionMessages maps action identifiers to user-facing text.
 var ActionMessages = map[string]string{
 	ActionAddSpending:         "Add spending",
@@ -24,11 +30,13 @@ var ActionMessages = map[string]string{
 // reservedLabels lists user-facing strings that must not be used as category names —
 // otherwise they'd shadow main-menu reply buttons.
 var reservedLabels = func() map[string]struct{} {
-	m := make(map[string]struct{}, len(ActionMessages)+1)
+	m := make(map[string]struct{}, len(ActionMessages)+3)
 	for _, v := range ActionMessages {
 		m[v] = struct{}{}
 	}
 	m[SkipDescriptionLabel] = struct{}{}
+	m[DateLabelToday] = struct{}{}
+	m[DateLabelYesterday] = struct{}{}
 	return m
 }()
 
@@ -53,6 +61,15 @@ func (tbk *TbKeyboardProvider) GetMainKeyboard() tbapi.ReplyKeyboardMarkup {
 func (tbk *TbKeyboardProvider) GetSkipKeyboard() tbapi.ReplyKeyboardMarkup {
 	return tbapi.ReplyKeyboardMarkup{
 		Keyboard:        [][]tbapi.KeyboardButton{{{Text: SkipDescriptionLabel}}},
+		ResizeKeyboard:  true,
+		OneTimeKeyboard: true,
+	}
+}
+
+// GetDateKeyboard returns a two-button reply keyboard with Today / Yesterday shortcuts.
+func (tbk *TbKeyboardProvider) GetDateKeyboard() tbapi.ReplyKeyboardMarkup {
+	return tbapi.ReplyKeyboardMarkup{
+		Keyboard:        [][]tbapi.KeyboardButton{{{Text: DateLabelToday}, {Text: DateLabelYesterday}}},
 		ResizeKeyboard:  true,
 		OneTimeKeyboard: true,
 	}

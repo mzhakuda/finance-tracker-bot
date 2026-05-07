@@ -82,14 +82,19 @@ func execute(ctx context.Context) error {
 		return fmt.Errorf("failed to initialize spending storage: %w", err)
 	}
 
+	budgetDB, err := storage.NewBudget(dataDB)
+	if err != nil {
+		return fmt.Errorf("failed to initialize budget storage: %w", err)
+	}
+
 	tbAPI, err := tbapi.NewBotAPI(telegramToken)
 	if err != nil {
 		return fmt.Errorf("can't make telegram bot: %w", err)
 	}
 	tbAPI.Debug = false
 
-	botKeyboardProvider := keyboards.NewTbKeyboardProvider(categoryDB, spendingDB)
-	botStateManager := events.NewBotStateManager(tbAPI, botKeyboardProvider, userStateDB, categoryDB, spendingDB, defaultCurrency)
+	botKeyboardProvider := keyboards.NewTbKeyboardProvider(categoryDB, spendingDB, budgetDB, categoryDB)
+	botStateManager := events.NewBotStateManager(tbAPI, botKeyboardProvider, userStateDB, categoryDB, spendingDB, budgetDB, defaultCurrency)
 
 	commandHandler := &events.BotCommandHandler{
 		TbAPI:        tbAPI,
@@ -97,6 +102,7 @@ func execute(ctx context.Context) error {
 		StateManager: botStateManager,
 		Categories:   categoryDB,
 		Spendings:    spendingDB,
+		Budgets:      budgetDB,
 	}
 
 	messageHandler := &events.BotMessageHandler{
@@ -110,6 +116,7 @@ func execute(ctx context.Context) error {
 		StateManager: botStateManager,
 		Categories:   categoryDB,
 		Spendings:    spendingDB,
+		Budgets:      budgetDB,
 		TbKeyboards:  botKeyboardProvider,
 	}
 

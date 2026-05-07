@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"strings"
+	"time"
 
 	tbapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
@@ -52,21 +53,30 @@ func (h *BotMessageHandler) HandleMessages(ctx context.Context, update tbapi.Upd
 	// Per-state input validation: catch bad input *before* it lands in FSM data, so the
 	// user can correct without dropping out of the flow.
 	switch currentState.Current() {
-	case stateAwaitingAmountInput:
+	case stateAwaitingAmountInput, stateAwaitingBudgetAmount:
 		if _, _, err := parseAmount(messageText, ""); err != nil {
 			h.sendSimple(chatID, "Invalid amount: "+err.Error()+". Try again, or /cancel.")
 			return
 		}
-	case stateAwaitingNewCategoryName:
+	case stateAwaitingDateInput:
+		if _, err := parseDate(messageText, time.Now()); err != nil {
+			h.sendSimple(chatID, "Invalid date: "+err.Error()+". Try again, or /cancel.")
+			return
+		}
+	case stateAwaitingNewCategoryName, stateAwaitingEditCategoryName:
 		if reason, ok := validateCategoryName(messageText, h.TbKeyboards.IsReservedActionLabel); !ok {
 			h.sendSimple(chatID, "Invalid name: "+reason+". Try again, or /cancel.")
 			return
 		}
-	case stateAwaitingNewCategoryEmoji:
+	case stateAwaitingNewCategoryEmoji, stateAwaitingEditCategoryEmoji:
 		if reason, ok := validateEmoji(messageText); !ok {
 			h.sendSimple(chatID, "Invalid emoji: "+reason+". Try again, or /cancel.")
 			return
 		}
+	case stateAwaitingEditSpendingValue:
+		// Validation depends on the chosen field (stored in FSM data), and is performed
+		// in saveEditedSpending. On failure the bot drops back to Idle with an
+		// explanatory message.
 	case stateAwaitingDescriptionInput:
 		// Description is freeform; "Skip" is a recognized sentinel handled in saveSpending.
 	}

@@ -5,9 +5,11 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/jmoiron/sqlx"
 )
 
-func newTestDB(t *testing.T) (*Category, *Spending, *UserState) {
+func newTestStores(t *testing.T) (*Category, *Spending, *UserState, *sqlx.DB) {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	db, err := NewSqliteDB(dbPath)
@@ -28,6 +30,11 @@ func newTestDB(t *testing.T) (*Category, *Spending, *UserState) {
 	if err != nil {
 		t.Fatalf("NewUserState: %v", err)
 	}
+	return cat, sp, us, db
+}
+
+func newTestDB(t *testing.T) (*Category, *Spending, *UserState) {
+	cat, sp, us, _ := newTestStores(t)
 	return cat, sp, us
 }
 
@@ -237,6 +244,226 @@ func TestSpending_MigrationAddsCurrencyColumn(t *testing.T) {
 	got, err := sp.ListSpendings(1)
 	if err != nil || len(got) != 1 || got[0].Currency != "EUR" {
 		t.Fatalf("post-migration list mismatch: got=%+v err=%v", got, err)
+	}
+}
+
+func TestCategory_UpdateByID(t *testing.T) {
+	cat, _, _ := newTestDB(t)
+
+	_ = cat.AddOrUpdateCategory(CategoryInfo{UserID: 1, Name: "Food", Emoji: "🍔"})
+	_ = cat.AddOrUpdateCategory(CategoryInfo{UserID: 1, Name: "Transport", Emoji: "🚌"})
+	cats, _ := cat.ListCategories(1)
+	foodID := int64(0)
+	for _, c := range cats {
+		if c.Name == "Food" {
+			foodID = c.ID
+		}
+	}
+
+	// Rename collision: trying to rename "Food" → "Transport" must fail.
+	if err := cat.UpdateCategoryByID(1, foodID, "Transport", "🚌"); !errors.Is(err, ErrCategoryNameTaken) {
+		t.Fatalf("expected ErrCategoryNameTaken, got %v", err)
+	}
+
+	// Cross-user: user 2 can't update user 1's category.
+	if err := cat.UpdateCategoryByID(2, foodID, "Whatever", "🥗"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for cross-user, got %v", err)
+	}
+
+	// Happy path.
+	if err := cat.UpdateCategoryByID(1, foodID, "Groceries", "🥗"); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	updated, err := cat.GetCategoryForUser(1, foodID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if updated.Name != "Groceries" || updated.Emoji != "🥗" {
+		t.Fatalf("got %+v", updated)
+	}
+}
+
+func TestSpending_UpdateSpending(t *testing.T) {
+	cat, sp, _ := newTestDB(t)
+
+	_ = cat.AddOrUpdateCategory(CategoryInfo{UserID: 1, Name: "Food", Emoji: "🍔"})
+	_ = cat.AddOrUpdateCategory(CategoryInfo{UserID: 1, Name: "Transport", Emoji: "🚌"})
+	cats, _ := cat.ListCategories(1)
+	foodID, transportID := cats[0].ID, cats[1].ID
+
+	now := time.Now()
+	if err := sp.AddSpending(SpendingInfo{
+		UserID: 1, CategoryID: foodID, Amount: 10, Currency: "USD", Description: "old", Timestamp: now,
+	}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	rows, _ := sp.ListSpendings(1)
+	id := rows[0].ID
+
+	newAmount := 20.5
+	newCurrency := "EUR"
+	newDesc := "updated"
+	newTs := now.Add(-48 * time.Hour)
+	if err := sp.UpdateSpending(1, id, SpendingUpdate{
+		Amount:      &newAmount,
+		Currency:    &newCurrency,
+		Description: &newDesc,
+		Timestamp:   &newTs,
+		CategoryID:  &transportID,
+	}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	got, _ := sp.GetSpendingForUser(1, id)
+	if got.Amount != 20.5 || got.Currency != "EUR" || got.Description != "updated" || got.CategoryID != transportID {
+		t.Fatalf("got %+v", got)
+	}
+
+	// Cross-user.
+	if err := sp.UpdateSpending(2, id, SpendingUpdate{Amount: &newAmount}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for cross-user, got %v", err)
+	}
+
+	// Empty update is rejected.
+	if err := sp.UpdateSpending(1, id, SpendingUpdate{}); err == nil {
+		t.Fatalf("expected error on empty update")
+	}
+}
+
+func TestBudget_SetAndList(t *testing.T) {
+	cat, _, _, db := newTestStores(t)
+
+	bud, err := NewBudget(db)
+	if err != nil {
+		t.Fatalf("NewBudget: %v", err)
+	}
+
+	_ = cat.AddOrUpdateCategory(CategoryInfo{UserID: 1, Name: "Food", Emoji: "🍔"})
+	cats, _ := cat.ListCategories(1)
+	foodID := cats[0].ID
+
+	// Overall budget
+	if err := bud.SetBudget(BudgetInfo{UserID: 1, CategoryID: CategoryIDOverall, Amount: 500, Currency: "USD"}); err != nil {
+		t.Fatalf("set overall: %v", err)
+	}
+	// Category budget
+	if err := bud.SetBudget(BudgetInfo{UserID: 1, CategoryID: foodID, Amount: 100, Currency: "USD"}); err != nil {
+		t.Fatalf("set food: %v", err)
+	}
+
+	all, _ := bud.ListBudgets(1)
+	if len(all) != 2 {
+		t.Fatalf("expected 2 budgets, got %d", len(all))
+	}
+	// Overall first
+	if all[0].CategoryID != CategoryIDOverall {
+		t.Fatalf("expected overall first, got %+v", all[0])
+	}
+
+	// Upsert overrides amount.
+	if err := bud.SetBudget(BudgetInfo{UserID: 1, CategoryID: foodID, Amount: 150, Currency: "USD"}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	all, _ = bud.ListBudgets(1)
+	if len(all) != 2 {
+		t.Fatalf("upsert created a duplicate row, got %d budgets", len(all))
+	}
+}
+
+func TestBudget_GetForCategory_FallsBackToOverall(t *testing.T) {
+	cat, _, _, db := newTestStores(t)
+	bud, _ := NewBudget(db)
+
+	_ = cat.AddOrUpdateCategory(CategoryInfo{UserID: 1, Name: "Food", Emoji: "🍔"})
+	cats, _ := cat.ListCategories(1)
+	foodID := cats[0].ID
+
+	// Only an overall budget exists.
+	_ = bud.SetBudget(BudgetInfo{UserID: 1, CategoryID: CategoryIDOverall, Amount: 500, Currency: "USD"})
+	got, err := bud.GetBudgetForCategory(1, foodID)
+	if err != nil {
+		t.Fatalf("expected fallback to overall, got error %v", err)
+	}
+	if got.CategoryID != CategoryIDOverall {
+		t.Fatalf("expected overall fallback, got categoryID=%d", got.CategoryID)
+	}
+
+	// A category-specific budget takes precedence.
+	_ = bud.SetBudget(BudgetInfo{UserID: 1, CategoryID: foodID, Amount: 100, Currency: "USD"})
+	got, _ = bud.GetBudgetForCategory(1, foodID)
+	if got.CategoryID != foodID {
+		t.Fatalf("expected category-specific, got categoryID=%d", got.CategoryID)
+	}
+
+	// User without any budget → ErrNotFound.
+	if _, err := bud.GetBudgetForCategory(2, foodID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestBudget_DeleteCrossUser(t *testing.T) {
+	_, _, _, db := newTestStores(t)
+	bud, _ := NewBudget(db)
+	_ = bud.SetBudget(BudgetInfo{UserID: 1, CategoryID: CategoryIDOverall, Amount: 10, Currency: "USD"})
+	all, _ := bud.ListBudgets(1)
+	id := all[0].ID
+
+	if err := bud.DeleteBudget(2, id); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for cross-user, got %v", err)
+	}
+	if err := bud.DeleteBudget(1, id); err != nil {
+		t.Fatalf("delete own: %v", err)
+	}
+}
+
+func TestSpending_TotalSinceForCategory(t *testing.T) {
+	cat, sp, _ := newTestDB(t)
+	_ = cat.AddOrUpdateCategory(CategoryInfo{UserID: 1, Name: "Food", Emoji: "🍔"})
+	_ = cat.AddOrUpdateCategory(CategoryInfo{UserID: 1, Name: "Transport", Emoji: "🚌"})
+	cats, _ := cat.ListCategories(1)
+	foodID, transportID := cats[0].ID, cats[1].ID
+
+	now := time.Now()
+	add := func(catID int64, amount float64, currency string) {
+		t.Helper()
+		_ = sp.AddSpending(SpendingInfo{
+			UserID: 1, CategoryID: catID, Amount: amount, Currency: currency, Timestamp: now,
+		})
+	}
+	add(foodID, 10, "USD")
+	add(foodID, 20, "USD")
+	add(foodID, 5, "EUR")
+	add(transportID, 7, "USD")
+
+	since := now.Add(-1 * time.Hour)
+
+	// Category-scoped.
+	totals, err := sp.TotalSinceForCategory(1, foodID, since)
+	if err != nil {
+		t.Fatalf("foodID totals: %v", err)
+	}
+	usd, eur := 0.0, 0.0
+	for _, t := range totals {
+		switch t.Currency {
+		case "USD":
+			usd = t.Total
+		case "EUR":
+			eur = t.Total
+		}
+	}
+	if usd != 30 || eur != 5 {
+		t.Fatalf("food totals USD=%v EUR=%v", usd, eur)
+	}
+
+	// Overall.
+	totals, _ = sp.TotalSinceForCategory(1, CategoryIDOverall, since)
+	usd = 0
+	for _, t := range totals {
+		if t.Currency == "USD" {
+			usd = t.Total
+		}
+	}
+	if usd != 37 { // 10+20+7
+		t.Fatalf("overall USD=%v, want 37", usd)
 	}
 }
 
