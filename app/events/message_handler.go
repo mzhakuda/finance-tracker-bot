@@ -2,10 +2,11 @@ package events
 
 import (
 	"context"
-	"fmt"
-	tbapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
-	"github.com/nyanyamaga/finance-tracker-bot/app/keyboards"
 	"log"
+
+	tbapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+
+	"github.com/nyanyamaga/finance-tracker-bot/app/keyboards"
 )
 
 type BotMessageHandler struct {
@@ -14,11 +15,14 @@ type BotMessageHandler struct {
 }
 
 func (h *BotMessageHandler) HandleMessages(ctx context.Context, update tbapi.Update) {
-	var err error
+	if update.Message == nil || update.Message.From == nil {
+		return
+	}
 
 	userID := update.Message.From.ID
 	messageText := update.Message.Text
 
+	var err error
 	switch messageText {
 	case keyboards.ActionMessages[keyboards.ActionAddSpending]:
 		err = h.StateManager.TriggerStateChange(ctx, userID, "ChooseAddSpending", "")
@@ -27,20 +31,21 @@ func (h *BotMessageHandler) HandleMessages(ctx context.Context, update tbapi.Upd
 	default:
 		currentState, stateErr := h.StateManager.GetCurrentState(ctx, userID)
 		if stateErr != nil {
-			err = fmt.Errorf("failed to get current state: %v", stateErr)
-			break
+			log.Printf("[warn] failed to get current state for user %d: %v", userID, stateErr)
+			return
 		}
 
 		nextStates := currentState.AvailableTransitions()
-		if len(nextStates) == 0 {
-			err = fmt.Errorf("no available transitions from current state")
-			break
-		} else if len(nextStates) > 1 {
-			err = fmt.Errorf("more than one available transition from current state")
-			break
+		switch len(nextStates) {
+		case 0:
+			log.Printf("[info] ignoring message %q from user %d in terminal state %s", messageText, userID, currentState.Current())
+			return
+		case 1:
+			err = h.StateManager.TriggerStateChange(ctx, userID, nextStates[0], messageText)
+		default:
+			log.Printf("[warn] more than one available transition from state %s for user %d: %v", currentState.Current(), userID, nextStates)
+			return
 		}
-
-		err = h.StateManager.TriggerStateChange(ctx, userID, nextStates[0], messageText)
 	}
 
 	if err != nil {

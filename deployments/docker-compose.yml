@@ -1,0 +1,24 @@
+services:
+  bot:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile
+      args:
+        REVISION: ${REVISION:-docker}
+    image: finance-tracker-bot:latest
+    container_name: finance-tracker-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATA_FILE_PATH: /data/data.db
+    volumes:
+      - bot-data:/data
+    healthcheck:
+      test: ["CMD", "pgrep", "-f", "finance-tracker-bot"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  bot-data:
