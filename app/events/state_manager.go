@@ -6,13 +6,17 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	tbapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/looplab/fsm"
+
+	"github.com/nyanyamaga/finance-tracker-bot/app/keyboards"
 	"github.com/nyanyamaga/finance-tracker-bot/app/storage"
 )
 
@@ -20,37 +24,63 @@ const (
 	stateIdle                       = "Idle"
 	stateAwaitingCategorySelection  = "AwaitingCategorySelection"
 	stateAwaitingAmountInput        = "AwaitingAmountInput"
+	stateAwaitingDescriptionInput   = "AwaitingDescriptionInput"
 	stateSaveSpending               = "SaveSpending"
 	stateAwaitingNewCategoryName    = "AwaitingNewCategoryName"
 	stateAwaitingNewCategoryEmoji   = "AwaitingNewCategoryEmoji"
 	stateAwaitingSaveCategoryName   = "AwaitingSaveCategoryName"
 )
 
+const (
+	maxCategoryNameLength = 32
+	maxDescriptionLength  = 200
+	defaultRecentLimit    = 10
+)
+
+// dataKey* are the JSON keys used to persist user-state values across FSM transitions.
+const (
+	dataKeyCategorySelected        = "CategorySelected"
+	dataKeyAmountEntered           = "AmountEntered"
+	dataKeyDescriptionEntered      = "DescriptionEntered"
+	dataKeyAmountValue             = "AmountValue"   // numeric, validated
+	dataKeyAmountCurrency          = "AmountCurrency"
+	dataKeyNewCategoryNameEntered  = "NewCategoryNameEntered"
+	dataKeyNewCategoryEmojiEntered = "NewCategoryEmojiEntered"
+)
+
 type BotStateManager struct {
-	TbAPI       TbAPI
-	TbKeyboards TbKeyboards
-	UserState   UserStateRepository
-	Categories  CategoriesRepository
-	Spendings   SpendingsRepository
+	TbAPI           TbAPI
+	TbKeyboards     TbKeyboards
+	UserState       UserStateRepository
+	Categories      CategoriesRepository
+	Spendings       SpendingsRepository
+	DefaultCurrency string
 
 	mu         sync.Mutex
 	UserFSMs   map[int64]*fsm.FSM
 	UserValues map[int64]string
 }
 
-func NewBotStateManager(tbAPI TbAPI, tbKeyboards TbKeyboards, usRepository UserStateRepository, cRepository CategoriesRepository, sRepository SpendingsRepository) *BotStateManager {
+func NewBotStateManager(
+	tbAPI TbAPI,
+	tbKeyboards TbKeyboards,
+	usRepository UserStateRepository,
+	cRepository CategoriesRepository,
+	sRepository SpendingsRepository,
+	defaultCurrency string,
+) *BotStateManager {
 	return &BotStateManager{
-		TbAPI:       tbAPI,
-		TbKeyboards: tbKeyboards,
-		UserState:   usRepository,
-		Categories:  cRepository,
-		Spendings:   sRepository,
-		UserFSMs:    make(map[int64]*fsm.FSM),
-		UserValues:  make(map[int64]string),
+		TbAPI:           tbAPI,
+		TbKeyboards:     tbKeyboards,
+		UserState:       usRepository,
+		Categories:      cRepository,
+		Spendings:       sRepository,
+		DefaultCurrency: defaultCurrency,
+		UserFSMs:        make(map[int64]*fsm.FSM),
+		UserValues:      make(map[int64]string),
 	}
 }
 
-// newUserFSM constructs a fresh FSM for a user, starting at the supplied state.
 func (sm *BotStateManager) newUserFSM(userID int64, initialState string) *fsm.FSM {
 	return fsm.NewFSM(
 		initialState,
@@ -63,13 +93,15 @@ func (sm *BotStateManager) newUserFSM(userID int64, initialState string) *fsm.FS
 			{Name: "SaveNewCategory", Src: []string{stateAwaitingSaveCategoryName}, Dst: stateIdle},
 
 			{Name: "CategorySelected", Src: []string{stateAwaitingCategorySelection}, Dst: stateAwaitingAmountInput},
-			{Name: "AmountEntered", Src: []string{stateAwaitingAmountInput}, Dst: stateSaveSpending},
+			{Name: "AmountEntered", Src: []string{stateAwaitingAmountInput}, Dst: stateAwaitingDescriptionInput},
+			{Name: "DescriptionEntered", Src: []string{stateAwaitingDescriptionInput}, Dst: stateSaveSpending},
 			{Name: "SpendingSaved", Src: []string{stateSaveSpending}, Dst: stateIdle},
 
-			// Allows recovery from an invalid amount: stay in AwaitingAmountInput.
+			// Universal escape hatch — used by /cancel and on validation failure.
 			{Name: "ResetToIdle", Src: []string{
 				stateAwaitingCategorySelection,
 				stateAwaitingAmountInput,
+				stateAwaitingDescriptionInput,
 				stateSaveSpending,
 				stateAwaitingNewCategoryName,
 				stateAwaitingNewCategoryEmoji,
@@ -77,20 +109,19 @@ func (sm *BotStateManager) newUserFSM(userID int64, initialState string) *fsm.FS
 			}, Dst: stateIdle},
 		},
 		fsm.Callbacks{
-			"leave_state":                                    func(ctx context.Context, e *fsm.Event) { sm.leaveState(e, userID) },
-			"enter_" + stateIdle:                             func(ctx context.Context, e *fsm.Event) { sm.promptEnterIdle(userID) },
-			"enter_" + stateAwaitingCategorySelection:        func(ctx context.Context, e *fsm.Event) { sm.promptCategorySelection(userID) },
-			"enter_" + stateAwaitingAmountInput:              func(ctx context.Context, e *fsm.Event) { sm.promptAmountInput(userID) },
-			"enter_" + stateSaveSpending:                     func(ctx context.Context, e *fsm.Event) { sm.saveSpending(ctx, userID) },
-			"enter_" + stateAwaitingNewCategoryName:          func(ctx context.Context, e *fsm.Event) { sm.promptNewCategoryName(userID) },
-			"enter_" + stateAwaitingNewCategoryEmoji:         func(ctx context.Context, e *fsm.Event) { sm.promptNewCategoryEmoji(userID) },
-			"enter_" + stateAwaitingSaveCategoryName:         func(ctx context.Context, e *fsm.Event) { sm.promptSaveNewCategory(ctx, userID) },
+			"leave_state":                              func(ctx context.Context, e *fsm.Event) { sm.leaveState(e, userID) },
+			"enter_" + stateIdle:                       func(ctx context.Context, e *fsm.Event) { sm.promptEnterIdle(userID) },
+			"enter_" + stateAwaitingCategorySelection:  func(ctx context.Context, e *fsm.Event) { sm.promptCategorySelection(userID) },
+			"enter_" + stateAwaitingAmountInput:        func(ctx context.Context, e *fsm.Event) { sm.promptAmountInput(userID) },
+			"enter_" + stateAwaitingDescriptionInput:   func(ctx context.Context, e *fsm.Event) { sm.promptDescriptionInput(userID) },
+			"enter_" + stateSaveSpending:               func(ctx context.Context, e *fsm.Event) { sm.saveSpending(ctx, userID) },
+			"enter_" + stateAwaitingNewCategoryName:    func(ctx context.Context, e *fsm.Event) { sm.promptNewCategoryName(userID) },
+			"enter_" + stateAwaitingNewCategoryEmoji:   func(ctx context.Context, e *fsm.Event) { sm.promptNewCategoryEmoji(userID) },
+			"enter_" + stateAwaitingSaveCategoryName:   func(ctx context.Context, e *fsm.Event) { sm.promptSaveNewCategory(ctx, userID) },
 		},
 	)
 }
 
-// getOrCreateFSM returns the FSM for the user, creating it from persisted state when possible.
-// Caller must hold sm.mu.
 func (sm *BotStateManager) getOrCreateFSM(userID int64) *fsm.FSM {
 	if existing, ok := sm.UserFSMs[userID]; ok {
 		return existing
@@ -98,12 +129,11 @@ func (sm *BotStateManager) getOrCreateFSM(userID int64) *fsm.FSM {
 
 	initial := stateIdle
 	if persisted, err := sm.UserState.Read(userID); err == nil && persisted != nil && persisted.State != "" {
-		// Only restore states the FSM can actually be in. Event names are written
-		// to the state column by leaveState, so we only trust transition destinations.
 		switch persisted.State {
 		case stateIdle,
 			stateAwaitingCategorySelection,
 			stateAwaitingAmountInput,
+			stateAwaitingDescriptionInput,
 			stateSaveSpending,
 			stateAwaitingNewCategoryName,
 			stateAwaitingNewCategoryEmoji,
@@ -128,7 +158,7 @@ func (sm *BotStateManager) InitializeUserFSM(ctx context.Context, userID int64) 
 		DataJSON: "{}",
 	}
 	if err := sm.UserState.Write(initialState); err != nil {
-		log.Printf("[error] Failed to create initial state for user %d: %v", userID, err)
+		log.Printf("[error] failed to create initial state for user %d: %v", userID, err)
 	}
 }
 
@@ -161,9 +191,8 @@ func (sm *BotStateManager) SetIdleState(ctx context.Context, userID int64) {
 	sm.InitializeUserFSM(ctx, userID)
 }
 
-// resetToIdle forces the user's FSM back to the Idle state. Used to recover from
-// invalid input without losing the bot's grip on the user session.
-func (sm *BotStateManager) resetToIdle(ctx context.Context, userID int64) {
+// ResetToIdle forces the user's FSM back to Idle. Used by /cancel and validation failures.
+func (sm *BotStateManager) ResetToIdle(ctx context.Context, userID int64) {
 	sm.mu.Lock()
 	userFSM, ok := sm.UserFSMs[userID]
 	sm.mu.Unlock()
@@ -172,12 +201,22 @@ func (sm *BotStateManager) resetToIdle(ctx context.Context, userID int64) {
 		return
 	}
 	if userFSM.Current() == stateIdle {
+		sm.promptEnterIdle(userID)
 		return
 	}
 	if err := userFSM.Event(ctx, "ResetToIdle"); err != nil {
 		log.Printf("[warn] failed to reset user %d to Idle: %v", userID, err)
 		sm.SetIdleState(ctx, userID)
 	}
+}
+
+// HasCategories reports whether the user has at least one category.
+func (sm *BotStateManager) HasCategories(userID int64) (bool, error) {
+	cats, err := sm.Categories.ListCategories(userID)
+	if err != nil {
+		return false, err
+	}
+	return len(cats) > 0, nil
 }
 
 func (sm *BotStateManager) leaveState(e *fsm.Event, userID int64) {
@@ -197,7 +236,7 @@ func (sm *BotStateManager) leaveState(e *fsm.Event, userID int64) {
 
 	dataJSON, err := json.Marshal(updatedData)
 	if err != nil {
-		log.Printf("[error] Failed to marshal updated state data to JSON for user %d: %v", userID, err)
+		log.Printf("[error] failed to marshal updated state data to JSON for user %d: %v", userID, err)
 		return
 	}
 
@@ -208,20 +247,39 @@ func (sm *BotStateManager) leaveState(e *fsm.Event, userID int64) {
 	}
 
 	if err := sm.UserState.Write(stateInfo); err != nil {
-		log.Printf("[error] Failed to save updated user state for user %d: %v", userID, err)
+		log.Printf("[error] failed to save updated user state for user %d: %v", userID, err)
 		return
 	}
 
-	log.Printf("[info] User %d entered state %s, data: %s", userID, e.Dst, dataJSON)
+	log.Printf("[info] user %d entered state %s", userID, e.Dst)
 }
 
 func (sm *BotStateManager) promptEnterIdle(userID int64) {
-	if err := sm.sendBotResponse(userID, "Choose an option:", sm.TbKeyboards.GetMainKeyboard()); err != nil {
+	keyboard := sm.TbKeyboards.GetMainKeyboard()
+	if err := sm.sendBotResponse(userID, "Choose an option:", keyboard); err != nil {
 		log.Printf("[warn] error sending main message: %v", err)
 	}
 }
 
 func (sm *BotStateManager) promptCategorySelection(userID int64) {
+	categories, err := sm.Categories.ListCategories(userID)
+	if err != nil {
+		log.Printf("[warn] error listing categories for user %d: %v", userID, err)
+		_ = sm.sendBotResponse(userID, "Failed to load categories. Please try again later.", sm.TbKeyboards.GetMainKeyboard())
+		// Reset asynchronously via FSM event.
+		if userFSM := sm.fsmFor(userID); userFSM != nil {
+			_ = userFSM.Event(context.Background(), "ResetToIdle")
+		}
+		return
+	}
+	if len(categories) == 0 {
+		_ = sm.sendBotResponse(userID, "You don't have any categories yet. Tap *New spending category* to create one.", sm.TbKeyboards.GetMainKeyboard())
+		if userFSM := sm.fsmFor(userID); userFSM != nil {
+			_ = userFSM.Event(context.Background(), "ResetToIdle")
+		}
+		return
+	}
+
 	keyboard := sm.TbKeyboards.GetCategoryKeyboard(userID)
 	if err := sm.sendBotResponse(userID, "Please select a category:", &keyboard); err != nil {
 		log.Printf("[warn] error sending category selection prompt: %v", err)
@@ -229,13 +287,13 @@ func (sm *BotStateManager) promptCategorySelection(userID int64) {
 }
 
 func (sm *BotStateManager) promptNewCategoryName(userID int64) {
-	if err := sm.sendBotResponse(userID, "Please enter the name of the new category:", nil); err != nil {
+	if err := sm.sendBotResponse(userID, "Please enter the name of the new category (or /cancel):", noKeyboard()); err != nil {
 		log.Printf("[warn] error sending new category name prompt: %v", err)
 	}
 }
 
 func (sm *BotStateManager) promptNewCategoryEmoji(userID int64) {
-	if err := sm.sendBotResponse(userID, "Please enter the emoji for the new category:", nil); err != nil {
+	if err := sm.sendBotResponse(userID, "Please enter the emoji for the new category:", noKeyboard()); err != nil {
 		log.Printf("[warn] error sending new category emoji prompt: %v", err)
 	}
 }
@@ -244,17 +302,22 @@ func (sm *BotStateManager) promptSaveNewCategory(ctx context.Context, userID int
 	stateData, err := sm.getStateData(userID)
 	if err != nil {
 		log.Printf("[warn] error fetching state data: %v", err)
-		sm.resetToIdle(ctx, userID)
+		sm.ResetToIdle(ctx, userID)
 		return
 	}
 
-	name, ok := stringField(stateData, "NewCategoryNameEntered")
-	if !ok || strings.TrimSpace(name) == "" {
-		_ = sm.sendBotResponse(userID, "Category name is missing. Returning to the main menu.", nil)
-		sm.resetToIdle(ctx, userID)
+	name, _ := stringField(stateData, dataKeyNewCategoryNameEntered)
+	emoji, _ := stringField(stateData, dataKeyNewCategoryEmojiEntered)
+	if reason, ok := validateCategoryName(name, sm.TbKeyboards.IsReservedActionLabel); !ok {
+		_ = sm.sendBotResponse(userID, "Invalid category name: "+reason, sm.TbKeyboards.GetMainKeyboard())
+		sm.ResetToIdle(ctx, userID)
 		return
 	}
-	emoji, _ := stringField(stateData, "NewCategoryEmojiEntered")
+	if reason, ok := validateEmoji(emoji); !ok {
+		_ = sm.sendBotResponse(userID, "Invalid emoji: "+reason, sm.TbKeyboards.GetMainKeyboard())
+		sm.ResetToIdle(ctx, userID)
+		return
+	}
 
 	category := storage.CategoryInfo{
 		UserID: userID,
@@ -264,42 +327,52 @@ func (sm *BotStateManager) promptSaveNewCategory(ctx context.Context, userID int
 
 	if err = sm.Categories.AddOrUpdateCategory(category); err != nil {
 		log.Printf("[warn] error saving new category: %v", err)
-		_ = sm.sendBotResponse(userID, "Failed to save category. Please try again.", nil)
-		sm.resetToIdle(ctx, userID)
+		_ = sm.sendBotResponse(userID, "Failed to save category. Please try again.", sm.TbKeyboards.GetMainKeyboard())
+		sm.ResetToIdle(ctx, userID)
 		return
 	}
 
-	if err := sm.sendBotResponse(userID, "Category saved!", nil); err != nil {
+	if err := sm.sendBotResponse(userID, fmt.Sprintf("Category saved: %s %s", category.Emoji, category.Name), nil); err != nil {
 		log.Printf("[warn] error sending new category save prompt: %v", err)
 	}
 
-	sm.mu.Lock()
-	userFSM := sm.UserFSMs[userID]
-	sm.mu.Unlock()
-	if userFSM == nil {
-		return
-	}
-	if err := userFSM.Event(ctx, "SaveNewCategory"); err != nil {
-		log.Printf("[error] Failed to transition to Idle state for user %d: %v", userID, err)
+	if userFSM := sm.fsmFor(userID); userFSM != nil {
+		if err := userFSM.Event(ctx, "SaveNewCategory"); err != nil {
+			log.Printf("[error] failed to transition to Idle for user %d: %v", userID, err)
+		}
 	}
 }
 
+// sendBotResponse delivers a message. The keyboard parameter follows these conventions:
+//   - tbapi.ReplyKeyboardMarkup / *InlineKeyboardMarkup: shown to user
+//   - nil: do not touch the existing keyboard (Telegram keeps the previous reply keyboard)
+//   - noKeyboard() sentinel: explicitly remove the reply keyboard
 func (sm *BotStateManager) sendBotResponse(chatID int64, text string, keyboard interface{}) error {
 	tbMsg := tbapi.NewMessage(chatID, text)
 	tbMsg.ParseMode = tbapi.ModeMarkdown
 	tbMsg.DisableWebPagePreview = true
-	tbMsg.ReplyMarkup = keyboard
 
-	if keyboard == nil {
-		removeKeyboard := tbapi.NewRemoveKeyboard(true)
-		tbMsg.ReplyMarkup = removeKeyboard
+	switch v := keyboard.(type) {
+	case removeKeyboardSentinel:
+		tbMsg.ReplyMarkup = tbapi.NewRemoveKeyboard(true)
+		_ = v
+	case nil:
+		// leave ReplyMarkup unset — keeps previous keyboard visible
+	default:
+		tbMsg.ReplyMarkup = keyboard
 	}
 
 	if err := send(tbMsg, sm.TbAPI); err != nil {
-		return fmt.Errorf("can't send message to telegram %s, %d: %w", text, chatID, err)
+		return fmt.Errorf("can't send message to telegram chat=%d: %w", chatID, err)
 	}
 	return nil
 }
+
+// removeKeyboardSentinel is a typed marker so callers can ask to drop the reply keyboard
+// while keeping `nil` to mean "don't touch the keyboard".
+type removeKeyboardSentinel struct{}
+
+func noKeyboard() removeKeyboardSentinel { return removeKeyboardSentinel{} }
 
 func (sm *BotStateManager) getStateData(userID int64) (map[string]interface{}, error) {
 	currentStateInfo, err := sm.UserState.Read(userID)
@@ -311,71 +384,115 @@ func (sm *BotStateManager) getStateData(userID int64) (map[string]interface{}, e
 	if err != nil {
 		return nil, fmt.Errorf("failed to unmarshal data: %w", err)
 	}
-
 	return data, nil
 }
 
 func (sm *BotStateManager) promptAmountInput(userID int64) {
-	if err := sm.sendBotResponse(userID, "Please enter the amount:", nil); err != nil {
+	hint := fmt.Sprintf("Please enter the amount (e.g. `12.50` or `12.50 EUR`). Default currency: %s.", sm.defaultCurrency())
+	if err := sm.sendBotResponse(userID, hint, noKeyboard()); err != nil {
 		log.Printf("[warn] error sending amount prompt: %v", err)
 	}
+}
+
+func (sm *BotStateManager) promptDescriptionInput(userID int64) {
+	if err := sm.sendBotResponse(userID, "Please enter a description, or tap *Skip*:", sm.TbKeyboards.GetSkipKeyboard()); err != nil {
+		log.Printf("[warn] error sending description prompt: %v", err)
+	}
+}
+
+func (sm *BotStateManager) defaultCurrency() string {
+	if sm.DefaultCurrency == "" {
+		return "USD"
+	}
+	return sm.DefaultCurrency
 }
 
 func (sm *BotStateManager) saveSpending(ctx context.Context, userID int64) {
 	stateData, err := sm.getStateData(userID)
 	if err != nil {
 		log.Printf("[warn] error fetching state data: %v", err)
-		sm.resetToIdle(ctx, userID)
+		sm.ResetToIdle(ctx, userID)
 		return
 	}
 
 	categoryID, err := extractCategoryID(stateData)
 	if err != nil {
 		log.Printf("[warn] error parsing category for user %d: %v", userID, err)
-		_ = sm.sendBotResponse(userID, "Failed to read selected category. Returning to the main menu.", nil)
-		sm.resetToIdle(ctx, userID)
+		_ = sm.sendBotResponse(userID, "Failed to read selected category. Returning to the main menu.", sm.TbKeyboards.GetMainKeyboard())
+		sm.ResetToIdle(ctx, userID)
 		return
 	}
 
-	amountFloat, err := parseAmount(stateData)
+	// Verify the user actually owns the selected category. Without this, a forged callback
+	// payload could attach a spending to someone else's category.
+	if _, err := sm.Categories.GetCategoryForUser(userID, categoryID); err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			log.Printf("[warn] user %d attempted to use category %d not belonging to them", userID, categoryID)
+			_ = sm.sendBotResponse(userID, "Selected category is no longer available.", sm.TbKeyboards.GetMainKeyboard())
+		} else {
+			log.Printf("[warn] error verifying category ownership: %v", err)
+			_ = sm.sendBotResponse(userID, "Failed to verify category. Please try again.", sm.TbKeyboards.GetMainKeyboard())
+		}
+		sm.ResetToIdle(ctx, userID)
+		return
+	}
+
+	amountValue, currency, err := readAmountFromState(stateData, sm.defaultCurrency())
 	if err != nil {
 		log.Printf("[info] invalid amount for user %d: %v", userID, err)
-		_ = sm.sendBotResponse(userID, fmt.Sprintf("Invalid amount: %s. Returning to the main menu.", err.Error()), nil)
-		sm.resetToIdle(ctx, userID)
+		_ = sm.sendBotResponse(userID, fmt.Sprintf("Invalid amount: %s. Returning to the main menu.", err.Error()), sm.TbKeyboards.GetMainKeyboard())
+		sm.ResetToIdle(ctx, userID)
 		return
+	}
+
+	description, _ := stringField(stateData, dataKeyDescriptionEntered)
+	description = strings.TrimSpace(description)
+	if description == keyboards.SkipDescriptionLabel {
+		description = ""
+	}
+	if utf8.RuneCountInString(description) > maxDescriptionLength {
+		description = string([]rune(description)[:maxDescriptionLength])
 	}
 
 	spending := storage.SpendingInfo{
 		UserID:      userID,
 		CategoryID:  categoryID,
-		Amount:      amountFloat,
-		Description: "",
-		Timestamp:   time.Now(),
+		Amount:      amountValue,
+		Currency:    currency,
+		Description: description,
+		Timestamp:   time.Now().UTC(),
 	}
 
 	if err := sm.Spendings.AddSpending(spending); err != nil {
 		log.Printf("[warn] error saving spending for user %d: %v", userID, err)
-		_ = sm.sendBotResponse(userID, "Failed to save spending. Please try again.", nil)
-		sm.resetToIdle(ctx, userID)
+		_ = sm.sendBotResponse(userID, "Failed to save spending. Please try again.", sm.TbKeyboards.GetMainKeyboard())
+		sm.ResetToIdle(ctx, userID)
 		return
 	}
 
-	if err := sm.sendBotResponse(userID, fmt.Sprintf("Spending saved: %.2f", amountFloat), nil); err != nil {
+	confirmation := fmt.Sprintf("Spending saved: %.2f %s", amountValue, currency)
+	if description != "" {
+		confirmation = confirmation + " — " + description
+	}
+	if err := sm.sendBotResponse(userID, confirmation, nil); err != nil {
 		log.Printf("[warn] error sending spending save prompt: %v", err)
 	}
 
-	sm.mu.Lock()
-	userFSM := sm.UserFSMs[userID]
-	sm.mu.Unlock()
-	if userFSM == nil {
-		return
-	}
-	if err := userFSM.Event(ctx, "SpendingSaved"); err != nil {
-		log.Printf("[warn] error transitioning to Idle after saving spending for user %d: %v", userID, err)
+	if userFSM := sm.fsmFor(userID); userFSM != nil {
+		if err := userFSM.Event(ctx, "SpendingSaved"); err != nil {
+			log.Printf("[warn] error transitioning to Idle for user %d: %v", userID, err)
+		}
 	}
 }
 
-// stringField safely extracts a string-typed value from the user state data map.
+func (sm *BotStateManager) fsmFor(userID int64) *fsm.FSM {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	return sm.UserFSMs[userID]
+}
+
+// ---------- helpers ----------
+
 func stringField(data map[string]interface{}, key string) (string, bool) {
 	raw, ok := data[key]
 	if !ok || raw == nil {
@@ -385,19 +502,22 @@ func stringField(data map[string]interface{}, key string) (string, bool) {
 	return s, ok
 }
 
-// extractCategoryID parses the "category_<id>" callback payload stored under CategorySelected.
 func extractCategoryID(data map[string]interface{}) (int64, error) {
-	raw, ok := stringField(data, "CategorySelected")
+	raw, ok := stringField(data, dataKeyCategorySelected)
 	if !ok {
 		return 0, errors.New("category not selected")
 	}
-	parts := strings.SplitN(raw, "_", 2)
-	if len(parts) != 2 || parts[0] != "category" || parts[1] == "" {
+	const prefix = keyboards.CallbackCategory
+	if !strings.HasPrefix(raw, prefix) {
 		return 0, fmt.Errorf("malformed category payload %q", raw)
 	}
-	id, err := strconv.ParseInt(parts[1], 10, 64)
+	idStr := strings.TrimPrefix(raw, prefix)
+	if idStr == "" {
+		return 0, fmt.Errorf("missing category id in %q", raw)
+	}
+	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
-		return 0, fmt.Errorf("invalid category id %q: %w", parts[1], err)
+		return 0, fmt.Errorf("invalid category id %q: %w", idStr, err)
 	}
 	if id <= 0 {
 		return 0, fmt.Errorf("non-positive category id: %d", id)
@@ -405,29 +525,126 @@ func extractCategoryID(data map[string]interface{}) (int64, error) {
 	return id, nil
 }
 
-// parseAmount validates and parses the AmountEntered field. It accepts both "." and "," as
-// decimal separators, rejects non-positive and non-finite values, and trims whitespace.
-func parseAmount(data map[string]interface{}) (float64, error) {
-	raw, ok := stringField(data, "AmountEntered")
-	if !ok {
-		return 0, errors.New("amount not provided")
-	}
-	cleaned := strings.ReplaceAll(strings.TrimSpace(raw), ",", ".")
+// parseAmount validates and parses an amount expression. It accepts:
+//   - "12.50"
+//   - "12,50"
+//   - "12.50 EUR"  (uppercase 3-letter ISO 4217-ish; we don't validate the alphabet)
+//   - "12.50EUR"
+//
+// Currency is uppercased and trimmed; if absent, the supplied default is used.
+func parseAmount(raw, defaultCurrency string) (float64, string, error) {
+	cleaned := strings.TrimSpace(raw)
 	if cleaned == "" {
-		return 0, errors.New("amount is empty")
+		return 0, "", errors.New("amount is empty")
 	}
-	value, err := strconv.ParseFloat(cleaned, 64)
+
+	// Split on the last whitespace; the suffix (if alphabetic) is treated as currency.
+	currency := strings.ToUpper(strings.TrimSpace(defaultCurrency))
+	amountPart := cleaned
+
+	if idx := strings.LastIndexAny(cleaned, " \t"); idx >= 0 {
+		head := strings.TrimSpace(cleaned[:idx])
+		tail := strings.TrimSpace(cleaned[idx+1:])
+		if isCurrencyToken(tail) {
+			amountPart = head
+			currency = strings.ToUpper(tail)
+		}
+	} else {
+		// Try trailing letters without space, e.g. "12.50EUR".
+		i := len(cleaned)
+		for i > 0 && isCurrencyRune(rune(cleaned[i-1])) {
+			i--
+		}
+		if i < len(cleaned) && i > 0 {
+			suffix := cleaned[i:]
+			if isCurrencyToken(suffix) {
+				amountPart = strings.TrimSpace(cleaned[:i])
+				currency = strings.ToUpper(suffix)
+			}
+		}
+	}
+
+	amountPart = strings.ReplaceAll(amountPart, ",", ".")
+	if amountPart == "" {
+		return 0, "", errors.New("amount is empty")
+	}
+	value, err := strconv.ParseFloat(amountPart, 64)
 	if err != nil {
-		return 0, fmt.Errorf("not a number: %q", raw)
+		return 0, "", fmt.Errorf("not a number: %q", raw)
+	}
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		return 0, "", errors.New("amount is not a finite number")
 	}
 	if value <= 0 {
-		return 0, fmt.Errorf("amount must be positive, got %g", value)
+		return 0, "", fmt.Errorf("amount must be positive, got %g", value)
 	}
-	// Reject NaN/Inf — ParseFloat happily returns +Inf for very large literals.
-	if value != value || value-value != 0 {
-		return 0, fmt.Errorf("amount is not a finite number")
+	if currency == "" {
+		return 0, "", errors.New("currency is empty")
 	}
-	return value, nil
+	return value, currency, nil
+}
+
+// readAmountFromState extracts a previously-validated amount/currency from state, falling
+// back to re-parsing the raw user input if the validated values aren't there.
+func readAmountFromState(data map[string]interface{}, defaultCurrency string) (float64, string, error) {
+	if v, ok := data[dataKeyAmountValue]; ok {
+		if f, ok := v.(float64); ok && f > 0 {
+			currency, _ := stringField(data, dataKeyAmountCurrency)
+			if currency == "" {
+				currency = strings.ToUpper(strings.TrimSpace(defaultCurrency))
+			}
+			return f, currency, nil
+		}
+	}
+	raw, ok := stringField(data, dataKeyAmountEntered)
+	if !ok {
+		return 0, "", errors.New("amount not provided")
+	}
+	return parseAmount(raw, defaultCurrency)
+}
+
+func isCurrencyToken(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if !isCurrencyRune(r) {
+			return false
+		}
+	}
+	return true
+}
+
+func isCurrencyRune(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
+}
+
+func validateCategoryName(raw string, isReserved func(string) bool) (string, bool) {
+	name := strings.TrimSpace(raw)
+	if name == "" {
+		return "name cannot be empty", false
+	}
+	if utf8.RuneCountInString(name) > maxCategoryNameLength {
+		return fmt.Sprintf("name is too long (max %d characters)", maxCategoryNameLength), false
+	}
+	if strings.HasPrefix(name, "/") {
+		return "name cannot start with '/'", false
+	}
+	if isReserved != nil && isReserved(name) {
+		return "this name is reserved by the main menu", false
+	}
+	return "", true
+}
+
+func validateEmoji(raw string) (string, bool) {
+	emoji := strings.TrimSpace(raw)
+	if emoji == "" {
+		return "emoji cannot be empty", false
+	}
+	if utf8.RuneCountInString(emoji) > 8 {
+		return "emoji is too long", false
+	}
+	return "", true
 }
 
 func unmarshalUserData(jsonData string) (map[string]interface{}, error) {
