@@ -46,6 +46,7 @@ type SpendingsRepository interface {
 	AddSpending(info storage.SpendingInfo) error
 	ListSpendings(userID int64) ([]storage.SpendingInfo, error)
 	RecentSpendings(userID int64, limit int) ([]storage.SpendingDisplay, error)
+	AllSpendingsWithCategory(userID int64) ([]storage.SpendingDisplay, error)
 	TotalSince(userID int64, since time.Time) ([]storage.CurrencyTotal, error)
 	DeleteSpending(userID, spendingID int64) error
 }

@@ -98,6 +98,23 @@ func (s *Spending) ListSpendings(userID int64) ([]SpendingInfo, error) {
 	return spendings, nil
 }
 
+// AllSpendingsWithCategory returns every spending the user has, joined with category.
+// Used by export-style endpoints; large queries are paged by callers if needed.
+func (s *Spending) AllSpendingsWithCategory(userID int64) ([]SpendingDisplay, error) {
+	var rows []SpendingDisplay
+	query := `
+		SELECT s.id, s.user_id, s.category_id, s.amount, s.currency, s.description, s.timestamp,
+		       c.name AS category_name, c.emoji AS category_emoji
+		FROM spendings s
+		LEFT JOIN categories c ON c.id = s.category_id
+		WHERE s.user_id = ?
+		ORDER BY s.timestamp ASC`
+	if err := s.db.Select(&rows, query, userID); err != nil {
+		return nil, fmt.Errorf("failed to load all spendings for user_id=%d: %w", userID, err)
+	}
+	return rows, nil
+}
+
 // RecentSpendings returns the latest `limit` spendings for a user, joined with their category.
 func (s *Spending) RecentSpendings(userID int64, limit int) ([]SpendingDisplay, error) {
 	if limit <= 0 {
