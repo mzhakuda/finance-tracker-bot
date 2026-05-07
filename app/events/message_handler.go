@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"strings"
+	"time"
 
 	tbapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
@@ -55,6 +56,11 @@ func (h *BotMessageHandler) HandleMessages(ctx context.Context, update tbapi.Upd
 	case stateAwaitingAmountInput:
 		if _, _, err := parseAmount(messageText, ""); err != nil {
 			h.sendSimple(chatID, "Invalid amount: "+err.Error()+". Try again, or /cancel.")
+			return
+		}
+	case stateAwaitingDateInput:
+		if _, err := parseDate(messageText, time.Now()); err != nil {
+			h.sendSimple(chatID, "Invalid date: "+err.Error()+". Try again, or /cancel.")
 			return
 		}
 	case stateAwaitingNewCategoryName:

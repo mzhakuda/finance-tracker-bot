@@ -24,6 +24,7 @@ const (
 	stateIdle                       = "Idle"
 	stateAwaitingCategorySelection  = "AwaitingCategorySelection"
 	stateAwaitingAmountInput        = "AwaitingAmountInput"
+	stateAwaitingDateInput          = "AwaitingDateInput"
 	stateAwaitingDescriptionInput   = "AwaitingDescriptionInput"
 	stateSaveSpending               = "SaveSpending"
 	stateAwaitingNewCategoryName    = "AwaitingNewCategoryName"
@@ -41,11 +42,18 @@ const (
 const (
 	dataKeyCategorySelected        = "CategorySelected"
 	dataKeyAmountEntered           = "AmountEntered"
+	dataKeyDateEntered             = "DateEntered"
 	dataKeyDescriptionEntered      = "DescriptionEntered"
 	dataKeyAmountValue             = "AmountValue"   // numeric, validated
 	dataKeyAmountCurrency          = "AmountCurrency"
 	dataKeyNewCategoryNameEntered  = "NewCategoryNameEntered"
 	dataKeyNewCategoryEmojiEntered = "NewCategoryEmojiEntered"
+)
+
+// Date keyboard labels — also accepted as text input.
+const (
+	dateLabelToday     = "Today"
+	dateLabelYesterday = "Yesterday"
 )
 
 type BotStateManager struct {
@@ -93,7 +101,8 @@ func (sm *BotStateManager) newUserFSM(userID int64, initialState string) *fsm.FS
 			{Name: "SaveNewCategory", Src: []string{stateAwaitingSaveCategoryName}, Dst: stateIdle},
 
 			{Name: "CategorySelected", Src: []string{stateAwaitingCategorySelection}, Dst: stateAwaitingAmountInput},
-			{Name: "AmountEntered", Src: []string{stateAwaitingAmountInput}, Dst: stateAwaitingDescriptionInput},
+			{Name: "AmountEntered", Src: []string{stateAwaitingAmountInput}, Dst: stateAwaitingDateInput},
+			{Name: "DateEntered", Src: []string{stateAwaitingDateInput}, Dst: stateAwaitingDescriptionInput},
 			{Name: "DescriptionEntered", Src: []string{stateAwaitingDescriptionInput}, Dst: stateSaveSpending},
 			{Name: "SpendingSaved", Src: []string{stateSaveSpending}, Dst: stateIdle},
 
@@ -101,6 +110,7 @@ func (sm *BotStateManager) newUserFSM(userID int64, initialState string) *fsm.FS
 			{Name: "ResetToIdle", Src: []string{
 				stateAwaitingCategorySelection,
 				stateAwaitingAmountInput,
+				stateAwaitingDateInput,
 				stateAwaitingDescriptionInput,
 				stateSaveSpending,
 				stateAwaitingNewCategoryName,
@@ -113,6 +123,7 @@ func (sm *BotStateManager) newUserFSM(userID int64, initialState string) *fsm.FS
 			"enter_" + stateIdle:                       func(ctx context.Context, e *fsm.Event) { sm.promptEnterIdle(userID) },
 			"enter_" + stateAwaitingCategorySelection:  func(ctx context.Context, e *fsm.Event) { sm.promptCategorySelection(userID) },
 			"enter_" + stateAwaitingAmountInput:        func(ctx context.Context, e *fsm.Event) { sm.promptAmountInput(userID) },
+			"enter_" + stateAwaitingDateInput:          func(ctx context.Context, e *fsm.Event) { sm.promptDateInput(userID) },
 			"enter_" + stateAwaitingDescriptionInput:   func(ctx context.Context, e *fsm.Event) { sm.promptDescriptionInput(userID) },
 			"enter_" + stateSaveSpending:               func(ctx context.Context, e *fsm.Event) { sm.saveSpending(ctx, userID) },
 			"enter_" + stateAwaitingNewCategoryName:    func(ctx context.Context, e *fsm.Event) { sm.promptNewCategoryName(userID) },
@@ -133,6 +144,7 @@ func (sm *BotStateManager) getOrCreateFSM(userID int64) *fsm.FSM {
 		case stateIdle,
 			stateAwaitingCategorySelection,
 			stateAwaitingAmountInput,
+			stateAwaitingDateInput,
 			stateAwaitingDescriptionInput,
 			stateSaveSpending,
 			stateAwaitingNewCategoryName,
@@ -394,6 +406,13 @@ func (sm *BotStateManager) promptAmountInput(userID int64) {
 	}
 }
 
+func (sm *BotStateManager) promptDateInput(userID int64) {
+	hint := "When did the spending happen? Tap *Today*, *Yesterday*, or type a date (e.g. `15.04`, `15.04.2026`, `2026-04-15`)."
+	if err := sm.sendBotResponse(userID, hint, sm.TbKeyboards.GetDateKeyboard()); err != nil {
+		log.Printf("[warn] error sending date prompt: %v", err)
+	}
+}
+
 func (sm *BotStateManager) promptDescriptionInput(userID int64) {
 	if err := sm.sendBotResponse(userID, "Please enter a description, or tap *Skip*:", sm.TbKeyboards.GetSkipKeyboard()); err != nil {
 		log.Printf("[warn] error sending description prompt: %v", err)
@@ -445,6 +464,14 @@ func (sm *BotStateManager) saveSpending(ctx context.Context, userID int64) {
 		return
 	}
 
+	timestamp, err := readDateFromState(stateData, time.Now())
+	if err != nil {
+		log.Printf("[info] invalid date for user %d: %v", userID, err)
+		_ = sm.sendBotResponse(userID, fmt.Sprintf("Invalid date: %s. Returning to the main menu.", err.Error()), sm.TbKeyboards.GetMainKeyboard())
+		sm.ResetToIdle(ctx, userID)
+		return
+	}
+
 	description, _ := stringField(stateData, dataKeyDescriptionEntered)
 	description = strings.TrimSpace(description)
 	if description == keyboards.SkipDescriptionLabel {
@@ -460,7 +487,7 @@ func (sm *BotStateManager) saveSpending(ctx context.Context, userID int64) {
 		Amount:      amountValue,
 		Currency:    currency,
 		Description: description,
-		Timestamp:   time.Now().UTC(),
+		Timestamp:   timestamp.UTC(),
 	}
 
 	if err := sm.Spendings.AddSpending(spending); err != nil {
@@ -582,6 +609,65 @@ func parseAmount(raw, defaultCurrency string) (float64, string, error) {
 		return 0, "", errors.New("currency is empty")
 	}
 	return value, currency, nil
+}
+
+// parseDate accepts the labels "Today" / "Yesterday" (case-insensitive), as well as
+// the formats DD.MM, DD.MM.YYYY, YYYY-MM-DD, DD/MM, DD/MM/YYYY. The reference time is used
+// for relative labels and for filling in the year when it isn't supplied. The result is
+// midday in the reference's location, to dodge edge-case DST transitions.
+func parseDate(raw string, ref time.Time) (time.Time, error) {
+	cleaned := strings.TrimSpace(raw)
+	if cleaned == "" {
+		return time.Time{}, errors.New("date is empty")
+	}
+	loc := ref.Location()
+
+	switch strings.ToLower(cleaned) {
+	case strings.ToLower(dateLabelToday), "today":
+		return time.Date(ref.Year(), ref.Month(), ref.Day(), 12, 0, 0, 0, loc), nil
+	case strings.ToLower(dateLabelYesterday), "yesterday":
+		y := ref.AddDate(0, 0, -1)
+		return time.Date(y.Year(), y.Month(), y.Day(), 12, 0, 0, 0, loc), nil
+	}
+
+	// Normalize separators: accept '/' as '.'.
+	normalized := strings.ReplaceAll(cleaned, "/", ".")
+
+	layouts := []string{"02.01.2006", "2.1.2006", "02.01", "2.1", "2006-01-02"}
+	for _, layout := range layouts {
+		t, err := time.ParseInLocation(layout, normalized, loc)
+		if err != nil {
+			continue
+		}
+		// Layouts without a year default to year 0 — fill it in from ref.
+		if t.Year() == 0 {
+			t = time.Date(ref.Year(), t.Month(), t.Day(), 12, 0, 0, 0, loc)
+			// If the resulting date is in the future relative to ref, assume the user
+			// meant the previous year (e.g. December date entered in January).
+			if t.After(ref) {
+				t = t.AddDate(-1, 0, 0)
+			}
+		} else {
+			t = time.Date(t.Year(), t.Month(), t.Day(), 12, 0, 0, 0, loc)
+		}
+		// Reject implausibly old or far-future dates so a typo can't insert a 1900-era row.
+		if t.Year() < 2000 || t.After(ref.AddDate(1, 0, 0)) {
+			return time.Time{}, fmt.Errorf("date %q is out of range", raw)
+		}
+		return t, nil
+	}
+	return time.Time{}, fmt.Errorf("could not parse date %q (try `15.04`, `15.04.2026`, `2026-04-15`, *Today*, *Yesterday*)", raw)
+}
+
+// readDateFromState reads the validated/raw date from FSM state, falling back to ref's
+// midday if the user never entered one (defensive — shouldn't happen given the FSM flow).
+func readDateFromState(data map[string]interface{}, ref time.Time) (time.Time, error) {
+	raw, ok := stringField(data, dataKeyDateEntered)
+	if !ok || strings.TrimSpace(raw) == "" {
+		// No input recorded — default to "today at noon".
+		return time.Date(ref.Year(), ref.Month(), ref.Day(), 12, 0, 0, 0, ref.Location()), nil
+	}
+	return parseDate(raw, ref)
 }
 
 // readAmountFromState extracts a previously-validated amount/currency from state, falling

@@ -26,6 +26,7 @@ type TbKeyboards interface {
 	GetCategoriesManagementKeyboard(userID int64) tbapi.InlineKeyboardMarkup
 	GetSpendingsManagementKeyboard(userID int64, limit int) tbapi.InlineKeyboardMarkup
 	GetSkipKeyboard() tbapi.ReplyKeyboardMarkup
+	GetDateKeyboard() tbapi.ReplyKeyboardMarkup
 	IsReservedActionLabel(text string) bool
 }
 
