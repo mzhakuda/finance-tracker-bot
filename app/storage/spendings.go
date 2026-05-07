@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -74,6 +75,78 @@ func NewSpending(db *sqlx.DB) (*Spending, error) {
 	}
 
 	return &Spending{db: db}, nil
+}
+
+// SpendingUpdate is a partial update payload. Non-nil fields are written; nil are kept.
+type SpendingUpdate struct {
+	Amount      *float64
+	Currency    *string
+	Description *string
+	Timestamp   *time.Time
+	CategoryID  *int64
+}
+
+// GetSpendingForUser returns a single spending owned by the user, or ErrNotFound.
+func (s *Spending) GetSpendingForUser(userID, spendingID int64) (*SpendingInfo, error) {
+	var info SpendingInfo
+	err := s.db.Get(&info,
+		"SELECT id, user_id, category_id, amount, currency, description, timestamp FROM spendings WHERE id = ? AND user_id = ?",
+		spendingID, userID,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("get spending id=%d: %w", spendingID, err)
+	}
+	return &info, nil
+}
+
+// UpdateSpending applies a partial update. Only non-nil fields are touched. Returns
+// ErrNotFound if the row doesn't exist or is owned by someone else.
+func (s *Spending) UpdateSpending(userID, spendingID int64, update SpendingUpdate) error {
+	sets := make([]string, 0, 5)
+	args := make([]interface{}, 0, 6)
+
+	if update.Amount != nil {
+		sets = append(sets, "amount = ?")
+		args = append(args, *update.Amount)
+	}
+	if update.Currency != nil {
+		sets = append(sets, "currency = ?")
+		args = append(args, *update.Currency)
+	}
+	if update.Description != nil {
+		sets = append(sets, "description = ?")
+		args = append(args, *update.Description)
+	}
+	if update.Timestamp != nil {
+		sets = append(sets, "timestamp = ?")
+		args = append(args, *update.Timestamp)
+	}
+	if update.CategoryID != nil {
+		sets = append(sets, "category_id = ?")
+		args = append(args, *update.CategoryID)
+	}
+	if len(sets) == 0 {
+		return errors.New("nothing to update")
+	}
+	args = append(args, spendingID, userID)
+
+	query := "UPDATE spendings SET " + strings.Join(sets, ", ") + " WHERE id = ? AND user_id = ?"
+	res, err := s.db.Exec(query, args...)
+	if err != nil {
+		return fmt.Errorf("update spending: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	log.Printf("[info] spending id=%d updated for user_id=%d", spendingID, userID)
+	return nil
 }
 
 // AddSpending inserts a new spending record.

@@ -30,6 +30,16 @@ const (
 	stateAwaitingNewCategoryName    = "AwaitingNewCategoryName"
 	stateAwaitingNewCategoryEmoji   = "AwaitingNewCategoryEmoji"
 	stateAwaitingSaveCategoryName   = "AwaitingSaveCategoryName"
+
+	// Edit-category subgraph
+	stateAwaitingEditCategoryName  = "AwaitingEditCategoryName"
+	stateAwaitingEditCategoryEmoji = "AwaitingEditCategoryEmoji"
+	stateSaveEditedCategory        = "SaveEditedCategory"
+
+	// Edit-spending subgraph
+	stateAwaitingEditSpendingField = "AwaitingEditSpendingField"
+	stateAwaitingEditSpendingValue = "AwaitingEditSpendingValue"
+	stateSaveEditedSpending        = "SaveEditedSpending"
 )
 
 const (
@@ -48,6 +58,14 @@ const (
 	dataKeyAmountCurrency          = "AmountCurrency"
 	dataKeyNewCategoryNameEntered  = "NewCategoryNameEntered"
 	dataKeyNewCategoryEmojiEntered = "NewCategoryEmojiEntered"
+
+	dataKeyStartEditCategory        = "StartEditCategory" // value: category id (string)
+	dataKeyEditCategoryNameEntered  = "EditCategoryNameEntered"
+	dataKeyEditCategoryEmojiEntered = "EditCategoryEmojiEntered"
+
+	dataKeyStartEditSpending = "StartEditSpending" // value: spending id (string)
+	dataKeyEditFieldSelected = "EditFieldSelected" // value: amount|description|date|category
+	dataKeyEditValueEntered  = "EditValueEntered"  // value: raw new field value
 )
 
 // Date keyboard labels — also accepted as text input.
@@ -106,6 +124,18 @@ func (sm *BotStateManager) newUserFSM(userID int64, initialState string) *fsm.FS
 			{Name: "DescriptionEntered", Src: []string{stateAwaitingDescriptionInput}, Dst: stateSaveSpending},
 			{Name: "SpendingSaved", Src: []string{stateSaveSpending}, Dst: stateIdle},
 
+			// Edit-category subgraph
+			{Name: "StartEditCategory", Src: []string{stateIdle}, Dst: stateAwaitingEditCategoryName},
+			{Name: "EditCategoryNameEntered", Src: []string{stateAwaitingEditCategoryName}, Dst: stateAwaitingEditCategoryEmoji},
+			{Name: "EditCategoryEmojiEntered", Src: []string{stateAwaitingEditCategoryEmoji}, Dst: stateSaveEditedCategory},
+			{Name: "EditedCategorySaved", Src: []string{stateSaveEditedCategory}, Dst: stateIdle},
+
+			// Edit-spending subgraph
+			{Name: "StartEditSpending", Src: []string{stateIdle}, Dst: stateAwaitingEditSpendingField},
+			{Name: "EditFieldSelected", Src: []string{stateAwaitingEditSpendingField}, Dst: stateAwaitingEditSpendingValue},
+			{Name: "EditValueEntered", Src: []string{stateAwaitingEditSpendingValue}, Dst: stateSaveEditedSpending},
+			{Name: "EditedSpendingSaved", Src: []string{stateSaveEditedSpending}, Dst: stateIdle},
+
 			// Universal escape hatch — used by /cancel and on validation failure.
 			{Name: "ResetToIdle", Src: []string{
 				stateAwaitingCategorySelection,
@@ -116,6 +146,12 @@ func (sm *BotStateManager) newUserFSM(userID int64, initialState string) *fsm.FS
 				stateAwaitingNewCategoryName,
 				stateAwaitingNewCategoryEmoji,
 				stateAwaitingSaveCategoryName,
+				stateAwaitingEditCategoryName,
+				stateAwaitingEditCategoryEmoji,
+				stateSaveEditedCategory,
+				stateAwaitingEditSpendingField,
+				stateAwaitingEditSpendingValue,
+				stateSaveEditedSpending,
 			}, Dst: stateIdle},
 		},
 		fsm.Callbacks{
@@ -129,6 +165,14 @@ func (sm *BotStateManager) newUserFSM(userID int64, initialState string) *fsm.FS
 			"enter_" + stateAwaitingNewCategoryName:    func(ctx context.Context, e *fsm.Event) { sm.promptNewCategoryName(userID) },
 			"enter_" + stateAwaitingNewCategoryEmoji:   func(ctx context.Context, e *fsm.Event) { sm.promptNewCategoryEmoji(userID) },
 			"enter_" + stateAwaitingSaveCategoryName:   func(ctx context.Context, e *fsm.Event) { sm.promptSaveNewCategory(ctx, userID) },
+
+			"enter_" + stateAwaitingEditCategoryName:  func(ctx context.Context, e *fsm.Event) { sm.promptEditCategoryName(userID) },
+			"enter_" + stateAwaitingEditCategoryEmoji: func(ctx context.Context, e *fsm.Event) { sm.promptEditCategoryEmoji(userID) },
+			"enter_" + stateSaveEditedCategory:        func(ctx context.Context, e *fsm.Event) { sm.saveEditedCategory(ctx, userID) },
+
+			"enter_" + stateAwaitingEditSpendingField: func(ctx context.Context, e *fsm.Event) { sm.promptEditSpendingField(userID) },
+			"enter_" + stateAwaitingEditSpendingValue: func(ctx context.Context, e *fsm.Event) { sm.promptEditSpendingValue(userID) },
+			"enter_" + stateSaveEditedSpending:        func(ctx context.Context, e *fsm.Event) { sm.saveEditedSpending(ctx, userID) },
 		},
 	)
 }
@@ -149,7 +193,13 @@ func (sm *BotStateManager) getOrCreateFSM(userID int64) *fsm.FSM {
 			stateSaveSpending,
 			stateAwaitingNewCategoryName,
 			stateAwaitingNewCategoryEmoji,
-			stateAwaitingSaveCategoryName:
+			stateAwaitingSaveCategoryName,
+			stateAwaitingEditCategoryName,
+			stateAwaitingEditCategoryEmoji,
+			stateSaveEditedCategory,
+			stateAwaitingEditSpendingField,
+			stateAwaitingEditSpendingValue,
+			stateSaveEditedSpending:
 			initial = persisted.State
 		}
 	}
@@ -516,6 +566,222 @@ func (sm *BotStateManager) fsmFor(userID int64) *fsm.FSM {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	return sm.UserFSMs[userID]
+}
+
+// ---------- edit-category subgraph ----------
+
+func (sm *BotStateManager) promptEditCategoryName(userID int64) {
+	if err := sm.sendBotResponse(userID, "Enter the new category name (or /cancel):", noKeyboard()); err != nil {
+		log.Printf("[warn] error sending edit category name prompt: %v", err)
+	}
+}
+
+func (sm *BotStateManager) promptEditCategoryEmoji(userID int64) {
+	if err := sm.sendBotResponse(userID, "Enter the new emoji:", noKeyboard()); err != nil {
+		log.Printf("[warn] error sending edit category emoji prompt: %v", err)
+	}
+}
+
+func (sm *BotStateManager) saveEditedCategory(ctx context.Context, userID int64) {
+	stateData, err := sm.getStateData(userID)
+	if err != nil {
+		log.Printf("[warn] error fetching state data: %v", err)
+		sm.ResetToIdle(ctx, userID)
+		return
+	}
+
+	idStr, _ := stringField(stateData, dataKeyStartEditCategory)
+	categoryID, err := strconv.ParseInt(strings.TrimSpace(idStr), 10, 64)
+	if err != nil || categoryID <= 0 {
+		log.Printf("[warn] missing/invalid edit category id for user %d: %q", userID, idStr)
+		_ = sm.sendBotResponse(userID, "Edit session lost. Returning to the main menu.", sm.TbKeyboards.GetMainKeyboard())
+		sm.ResetToIdle(ctx, userID)
+		return
+	}
+	if _, err := sm.Categories.GetCategoryForUser(userID, categoryID); err != nil {
+		_ = sm.sendBotResponse(userID, "Category is no longer available.", sm.TbKeyboards.GetMainKeyboard())
+		sm.ResetToIdle(ctx, userID)
+		return
+	}
+
+	name, _ := stringField(stateData, dataKeyEditCategoryNameEntered)
+	emoji, _ := stringField(stateData, dataKeyEditCategoryEmojiEntered)
+	if reason, ok := validateCategoryName(name, sm.TbKeyboards.IsReservedActionLabel); !ok {
+		_ = sm.sendBotResponse(userID, "Invalid name: "+reason, sm.TbKeyboards.GetMainKeyboard())
+		sm.ResetToIdle(ctx, userID)
+		return
+	}
+	if reason, ok := validateEmoji(emoji); !ok {
+		_ = sm.sendBotResponse(userID, "Invalid emoji: "+reason, sm.TbKeyboards.GetMainKeyboard())
+		sm.ResetToIdle(ctx, userID)
+		return
+	}
+
+	err = sm.Categories.UpdateCategoryByID(userID, categoryID, strings.TrimSpace(name), strings.TrimSpace(emoji))
+	switch {
+	case errors.Is(err, storage.ErrCategoryNameTaken):
+		_ = sm.sendBotResponse(userID, "Another category already uses that name.", sm.TbKeyboards.GetMainKeyboard())
+	case errors.Is(err, storage.ErrNotFound):
+		_ = sm.sendBotResponse(userID, "Category is no longer available.", sm.TbKeyboards.GetMainKeyboard())
+	case err != nil:
+		log.Printf("[warn] failed to update category for user %d: %v", userID, err)
+		_ = sm.sendBotResponse(userID, "Failed to save changes.", sm.TbKeyboards.GetMainKeyboard())
+	default:
+		_ = sm.sendBotResponse(userID, fmt.Sprintf("Category updated: %s %s", strings.TrimSpace(emoji), strings.TrimSpace(name)), nil)
+	}
+
+	if userFSM := sm.fsmFor(userID); userFSM != nil {
+		_ = userFSM.Event(ctx, "EditedCategorySaved")
+	}
+}
+
+// ---------- edit-spending subgraph ----------
+
+func (sm *BotStateManager) promptEditSpendingField(userID int64) {
+	keyboard := sm.TbKeyboards.GetEditSpendingFieldKeyboard()
+	if err := sm.sendBotResponse(userID, "Which field do you want to edit?", &keyboard); err != nil {
+		log.Printf("[warn] error sending edit spending field prompt: %v", err)
+	}
+}
+
+func (sm *BotStateManager) promptEditSpendingValue(userID int64) {
+	stateData, err := sm.getStateData(userID)
+	if err != nil {
+		log.Printf("[warn] error fetching state data: %v", err)
+		return
+	}
+	field, _ := stringField(stateData, dataKeyEditFieldSelected)
+	switch field {
+	case keyboards.EditFieldAmount:
+		hint := fmt.Sprintf("Enter the new amount (e.g. `12.50` or `12.50 EUR`). Default currency: %s.", sm.defaultCurrency())
+		_ = sm.sendBotResponse(userID, hint, noKeyboard())
+	case keyboards.EditFieldDescription:
+		_ = sm.sendBotResponse(userID, "Enter the new description (or tap *Skip* to clear):", sm.TbKeyboards.GetSkipKeyboard())
+	case keyboards.EditFieldDate:
+		_ = sm.sendBotResponse(userID, "Enter the new date (e.g. `15.04`, `15.04.2026`, *Today*, *Yesterday*):", sm.TbKeyboards.GetDateKeyboard())
+	case keyboards.EditFieldCategory:
+		keyboard := sm.TbKeyboards.GetCategoryPickKeyboard(userID)
+		_ = sm.sendBotResponse(userID, "Pick the new category:", &keyboard)
+	default:
+		log.Printf("[warn] unknown edit field %q for user %d", field, userID)
+		sm.ResetToIdle(context.Background(), userID)
+	}
+}
+
+func (sm *BotStateManager) saveEditedSpending(ctx context.Context, userID int64) {
+	stateData, err := sm.getStateData(userID)
+	if err != nil {
+		log.Printf("[warn] error fetching state data: %v", err)
+		sm.ResetToIdle(ctx, userID)
+		return
+	}
+
+	idStr, _ := stringField(stateData, dataKeyStartEditSpending)
+	spendingID, err := strconv.ParseInt(strings.TrimSpace(idStr), 10, 64)
+	if err != nil || spendingID <= 0 {
+		log.Printf("[warn] missing/invalid edit spending id for user %d: %q", userID, idStr)
+		_ = sm.sendBotResponse(userID, "Edit session lost. Returning to the main menu.", sm.TbKeyboards.GetMainKeyboard())
+		sm.ResetToIdle(ctx, userID)
+		return
+	}
+	if _, err := sm.Spendings.GetSpendingForUser(userID, spendingID); err != nil {
+		_ = sm.sendBotResponse(userID, "Spending is no longer available.", sm.TbKeyboards.GetMainKeyboard())
+		sm.ResetToIdle(ctx, userID)
+		return
+	}
+
+	field, _ := stringField(stateData, dataKeyEditFieldSelected)
+	rawValue, _ := stringField(stateData, dataKeyEditValueEntered)
+	rawValue = strings.TrimSpace(rawValue)
+
+	update := storage.SpendingUpdate{}
+	confirmation := ""
+
+	switch field {
+	case keyboards.EditFieldAmount:
+		amount, currency, err := parseAmount(rawValue, sm.defaultCurrency())
+		if err != nil {
+			_ = sm.sendBotResponse(userID, "Invalid amount: "+err.Error(), sm.TbKeyboards.GetMainKeyboard())
+			sm.ResetToIdle(ctx, userID)
+			return
+		}
+		update.Amount = &amount
+		update.Currency = &currency
+		confirmation = fmt.Sprintf("Amount updated to %.2f %s.", amount, currency)
+	case keyboards.EditFieldDescription:
+		desc := rawValue
+		if desc == keyboards.SkipDescriptionLabel {
+			desc = ""
+		}
+		if utf8.RuneCountInString(desc) > maxDescriptionLength {
+			desc = string([]rune(desc)[:maxDescriptionLength])
+		}
+		update.Description = &desc
+		if desc == "" {
+			confirmation = "Description cleared."
+		} else {
+			confirmation = "Description updated."
+		}
+	case keyboards.EditFieldDate:
+		ts, err := parseDate(rawValue, time.Now())
+		if err != nil {
+			_ = sm.sendBotResponse(userID, "Invalid date: "+err.Error(), sm.TbKeyboards.GetMainKeyboard())
+			sm.ResetToIdle(ctx, userID)
+			return
+		}
+		ts = ts.UTC()
+		update.Timestamp = &ts
+		confirmation = "Date updated to " + ts.Local().Format("02 Jan 2006") + "."
+	case keyboards.EditFieldCategory:
+		categoryID, err := parsePickCategoryPayload(rawValue)
+		if err != nil {
+			_ = sm.sendBotResponse(userID, "Invalid category selection.", sm.TbKeyboards.GetMainKeyboard())
+			sm.ResetToIdle(ctx, userID)
+			return
+		}
+		if _, err := sm.Categories.GetCategoryForUser(userID, categoryID); err != nil {
+			_ = sm.sendBotResponse(userID, "Selected category is unavailable.", sm.TbKeyboards.GetMainKeyboard())
+			sm.ResetToIdle(ctx, userID)
+			return
+		}
+		update.CategoryID = &categoryID
+		confirmation = "Category updated."
+	default:
+		log.Printf("[warn] unknown edit field %q for user %d", field, userID)
+		sm.ResetToIdle(ctx, userID)
+		return
+	}
+
+	if err := sm.Spendings.UpdateSpending(userID, spendingID, update); err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			_ = sm.sendBotResponse(userID, "Spending is no longer available.", sm.TbKeyboards.GetMainKeyboard())
+		} else {
+			log.Printf("[warn] failed to update spending: %v", err)
+			_ = sm.sendBotResponse(userID, "Failed to save changes.", sm.TbKeyboards.GetMainKeyboard())
+		}
+		sm.ResetToIdle(ctx, userID)
+		return
+	}
+
+	_ = sm.sendBotResponse(userID, confirmation, nil)
+	if userFSM := sm.fsmFor(userID); userFSM != nil {
+		_ = userFSM.Event(ctx, "EditedSpendingSaved")
+	}
+}
+
+// parsePickCategoryPayload extracts the category id from a "pickcat_<id>" callback payload
+// previously stored in EditValueEntered.
+func parsePickCategoryPayload(raw string) (int64, error) {
+	const prefix = keyboards.CallbackPickCategory
+	if !strings.HasPrefix(raw, prefix) {
+		return 0, fmt.Errorf("malformed payload %q", raw)
+	}
+	idStr := strings.TrimPrefix(raw, prefix)
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil || id <= 0 {
+		return 0, fmt.Errorf("invalid id %q", idStr)
+	}
+	return id, nil
 }
 
 // ---------- helpers ----------

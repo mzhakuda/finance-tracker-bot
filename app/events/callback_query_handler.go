@@ -32,7 +32,6 @@ func (h *BotCallbackQueryHandler) HandleCallbackQuery(ctx context.Context, updat
 
 	log.Printf("[info] callback: user=%d data=%s", userID, callbackData)
 
-	// Acknowledge the callback so Telegram clears the loading spinner.
 	defer h.answer(cb.ID, "")
 
 	switch {
@@ -44,9 +43,26 @@ func (h *BotCallbackQueryHandler) HandleCallbackQuery(ctx context.Context, updat
 	case strings.HasPrefix(callbackData, keyboards.CallbackDeleteSpending):
 		h.handleDeleteSpending(userID, cb, callbackData)
 		return
+	case strings.HasPrefix(callbackData, keyboards.CallbackEditCategory):
+		h.handleStartEditCategory(ctx, userID, cb, callbackData)
+		return
+	case strings.HasPrefix(callbackData, keyboards.CallbackEditSpending):
+		h.handleStartEditSpending(ctx, userID, cb, callbackData)
+		return
+	case strings.HasPrefix(callbackData, keyboards.CallbackEditField):
+		h.handlePickEditField(ctx, userID, callbackData)
+		return
+	case strings.HasPrefix(callbackData, keyboards.CallbackPickCategory):
+		// Pass through as a value to the FSM, which is in AwaitingEditSpendingValue.
+		h.handleFSMValue(ctx, userID, callbackData)
+		return
 	}
 
 	// Otherwise, treat it as input for the FSM.
+	h.handleFSMValue(ctx, userID, callbackData)
+}
+
+func (h *BotCallbackQueryHandler) handleFSMValue(ctx context.Context, userID int64, callbackData string) {
 	currentState, err := h.StateManager.GetCurrentState(ctx, userID)
 	if err != nil {
 		log.Printf("[warn] error retrieving current state for user %d: %v", userID, err)
@@ -83,7 +99,6 @@ func (h *BotCallbackQueryHandler) handleDeleteCategory(userID int64, cb *tbapi.C
 		return
 	}
 	h.answer(cb.ID, "Deleted.")
-	// Refresh the management keyboard in place.
 	newMarkup := h.TbKeyboards.GetCategoriesManagementKeyboard(userID)
 	edit := tbapi.NewEditMessageReplyMarkup(cb.Message.Chat.ID, cb.Message.MessageID, newMarkup)
 	if _, err := h.TbAPI.Request(edit); err != nil {
@@ -115,11 +130,55 @@ func (h *BotCallbackQueryHandler) handleDeleteSpending(userID int64, cb *tbapi.C
 	}
 }
 
-func (h *BotCallbackQueryHandler) answer(callbackID, text string) {
-	cfg := tbapi.NewCallback(callbackID, text)
-	if _, err := h.TbAPI.Request(cfg); err != nil {
-		// Telegram returns "query is too old" if we miss the 30s window — log at debug level only.
-		log.Printf("[debug] failed to answer callback %s: %v", callbackID, err)
+func (h *BotCallbackQueryHandler) handleStartEditCategory(ctx context.Context, userID int64, cb *tbapi.CallbackQuery, payload string) {
+	idStr := strings.TrimPrefix(payload, keyboards.CallbackEditCategory)
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil || id <= 0 {
+		h.answer(cb.ID, "Invalid category.")
+		return
+	}
+	if _, err := h.Categories.GetCategoryForUser(userID, id); err != nil {
+		h.answer(cb.ID, "Category not found.")
+		return
+	}
+	if err := h.StateManager.TriggerStateChange(ctx, userID, "StartEditCategory", strconv.FormatInt(id, 10)); err != nil {
+		log.Printf("[warn] error starting edit-category for user %d: %v", userID, err)
 	}
 }
 
+func (h *BotCallbackQueryHandler) handleStartEditSpending(ctx context.Context, userID int64, cb *tbapi.CallbackQuery, payload string) {
+	idStr := strings.TrimPrefix(payload, keyboards.CallbackEditSpending)
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil || id <= 0 {
+		h.answer(cb.ID, "Invalid spending.")
+		return
+	}
+	if _, err := h.Spendings.GetSpendingForUser(userID, id); err != nil {
+		h.answer(cb.ID, "Spending not found.")
+		return
+	}
+	if err := h.StateManager.TriggerStateChange(ctx, userID, "StartEditSpending", strconv.FormatInt(id, 10)); err != nil {
+		log.Printf("[warn] error starting edit-spending for user %d: %v", userID, err)
+	}
+}
+
+func (h *BotCallbackQueryHandler) handlePickEditField(ctx context.Context, userID int64, payload string) {
+	field := strings.TrimPrefix(payload, keyboards.CallbackEditField)
+	switch field {
+	case keyboards.EditFieldAmount, keyboards.EditFieldDescription, keyboards.EditFieldDate, keyboards.EditFieldCategory:
+		// known field
+	default:
+		log.Printf("[warn] unknown edit-field %q for user %d", field, userID)
+		return
+	}
+	if err := h.StateManager.TriggerStateChange(ctx, userID, "EditFieldSelected", field); err != nil {
+		log.Printf("[warn] error selecting edit-field for user %d: %v", userID, err)
+	}
+}
+
+func (h *BotCallbackQueryHandler) answer(callbackID, text string) {
+	cfg := tbapi.NewCallback(callbackID, text)
+	if _, err := h.TbAPI.Request(cfg); err != nil {
+		log.Printf("[debug] failed to answer callback %s: %v", callbackID, err)
+	}
+}

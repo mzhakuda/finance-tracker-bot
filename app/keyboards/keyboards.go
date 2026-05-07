@@ -56,6 +56,7 @@ func (tbk *TbKeyboardProvider) GetSpendingsManagementKeyboard(userID int64, limi
 
 		row := []tbapi.InlineKeyboardButton{
 			tbapi.NewInlineKeyboardButtonData(label, CallbackNoop),
+			tbapi.NewInlineKeyboardButtonData("Edit", fmt.Sprintf("%s%d", CallbackEditSpending, sp.ID)),
 			tbapi.NewInlineKeyboardButtonData("Delete", fmt.Sprintf("%s%d", CallbackDeleteSpending, sp.ID)),
 		}
 		keyboard = append(keyboard, row)

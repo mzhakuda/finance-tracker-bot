@@ -54,6 +54,49 @@ func (c *Category) AddOrUpdateCategory(info CategoryInfo) error {
 	return nil
 }
 
+// ErrCategoryNameTaken is returned by UpdateCategoryByID when the new name collides with
+// another category owned by the same user.
+var ErrCategoryNameTaken = errors.New("category name already in use")
+
+// UpdateCategoryByID renames and re-emojis a specific category owned by the user. It does
+// not auto-merge with an existing category that already has the new name — caller-friendly
+// error returned instead.
+func (c *Category) UpdateCategoryByID(userID, categoryID int64, newName, newEmoji string) error {
+	tx, err := c.db.Beginx()
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var existingID int64
+	err = tx.Get(&existingID, "SELECT id FROM categories WHERE user_id = ? AND name = ? AND id != ?", userID, newName, categoryID)
+	switch {
+	case err == nil:
+		return ErrCategoryNameTaken
+	case errors.Is(err, sql.ErrNoRows):
+		// no collision, proceed
+	default:
+		return fmt.Errorf("check name collision: %w", err)
+	}
+
+	res, err := tx.Exec("UPDATE categories SET name = ?, emoji = ? WHERE id = ? AND user_id = ?", newName, newEmoji, categoryID, userID)
+	if err != nil {
+		return fmt.Errorf("update category: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+	log.Printf("[info] category id=%d updated for user_id=%d", categoryID, userID)
+	return nil
+}
+
 // ListCategories returns all categories for a given user ID.
 func (c *Category) ListCategories(userID int64) ([]CategoryInfo, error) {
 	var categories []CategoryInfo

@@ -63,16 +63,20 @@ func (h *BotMessageHandler) HandleMessages(ctx context.Context, update tbapi.Upd
 			h.sendSimple(chatID, "Invalid date: "+err.Error()+". Try again, or /cancel.")
 			return
 		}
-	case stateAwaitingNewCategoryName:
+	case stateAwaitingNewCategoryName, stateAwaitingEditCategoryName:
 		if reason, ok := validateCategoryName(messageText, h.TbKeyboards.IsReservedActionLabel); !ok {
 			h.sendSimple(chatID, "Invalid name: "+reason+". Try again, or /cancel.")
 			return
 		}
-	case stateAwaitingNewCategoryEmoji:
+	case stateAwaitingNewCategoryEmoji, stateAwaitingEditCategoryEmoji:
 		if reason, ok := validateEmoji(messageText); !ok {
 			h.sendSimple(chatID, "Invalid emoji: "+reason+". Try again, or /cancel.")
 			return
 		}
+	case stateAwaitingEditSpendingValue:
+		// Validation depends on the chosen field (stored in FSM data), and is performed
+		// in saveEditedSpending. On failure the bot drops back to Idle with an
+		// explanatory message.
 	case stateAwaitingDescriptionInput:
 		// Description is freeform; "Skip" is a recognized sentinel handled in saveSpending.
 	}

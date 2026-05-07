@@ -57,7 +57,13 @@ func (stubKeyboards) GetSpendingsManagementKeyboard(int64, int) tbapi.InlineKeyb
 }
 func (stubKeyboards) GetSkipKeyboard() tbapi.ReplyKeyboardMarkup { return tbapi.ReplyKeyboardMarkup{} }
 func (stubKeyboards) GetDateKeyboard() tbapi.ReplyKeyboardMarkup { return tbapi.ReplyKeyboardMarkup{} }
-func (stubKeyboards) IsReservedActionLabel(string) bool          { return false }
+func (stubKeyboards) GetCategoryPickKeyboard(int64) tbapi.InlineKeyboardMarkup {
+	return tbapi.NewInlineKeyboardMarkup()
+}
+func (stubKeyboards) GetEditSpendingFieldKeyboard() tbapi.InlineKeyboardMarkup {
+	return tbapi.NewInlineKeyboardMarkup()
+}
+func (stubKeyboards) IsReservedActionLabel(string) bool { return false }
 
 // stubSpendings supplies canned spendings for /export.
 type stubSpendings struct {
@@ -79,6 +85,10 @@ func (s *stubSpendings) TotalSince(int64, time.Time) ([]storage.CurrencyTotal, e
 	return nil, nil
 }
 func (s *stubSpendings) DeleteSpending(int64, int64) error { return nil }
+func (s *stubSpendings) GetSpendingForUser(int64, int64) (*storage.SpendingInfo, error) {
+	return nil, storage.ErrNotFound
+}
+func (s *stubSpendings) UpdateSpending(int64, int64, storage.SpendingUpdate) error { return nil }
 
 func TestHandleExport_Empty(t *testing.T) {
 	api := &fakeTbAPI{}

@@ -240,6 +240,88 @@ func TestSpending_MigrationAddsCurrencyColumn(t *testing.T) {
 	}
 }
 
+func TestCategory_UpdateByID(t *testing.T) {
+	cat, _, _ := newTestDB(t)
+
+	_ = cat.AddOrUpdateCategory(CategoryInfo{UserID: 1, Name: "Food", Emoji: "🍔"})
+	_ = cat.AddOrUpdateCategory(CategoryInfo{UserID: 1, Name: "Transport", Emoji: "🚌"})
+	cats, _ := cat.ListCategories(1)
+	foodID := int64(0)
+	for _, c := range cats {
+		if c.Name == "Food" {
+			foodID = c.ID
+		}
+	}
+
+	// Rename collision: trying to rename "Food" → "Transport" must fail.
+	if err := cat.UpdateCategoryByID(1, foodID, "Transport", "🚌"); !errors.Is(err, ErrCategoryNameTaken) {
+		t.Fatalf("expected ErrCategoryNameTaken, got %v", err)
+	}
+
+	// Cross-user: user 2 can't update user 1's category.
+	if err := cat.UpdateCategoryByID(2, foodID, "Whatever", "🥗"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for cross-user, got %v", err)
+	}
+
+	// Happy path.
+	if err := cat.UpdateCategoryByID(1, foodID, "Groceries", "🥗"); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	updated, err := cat.GetCategoryForUser(1, foodID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if updated.Name != "Groceries" || updated.Emoji != "🥗" {
+		t.Fatalf("got %+v", updated)
+	}
+}
+
+func TestSpending_UpdateSpending(t *testing.T) {
+	cat, sp, _ := newTestDB(t)
+
+	_ = cat.AddOrUpdateCategory(CategoryInfo{UserID: 1, Name: "Food", Emoji: "🍔"})
+	_ = cat.AddOrUpdateCategory(CategoryInfo{UserID: 1, Name: "Transport", Emoji: "🚌"})
+	cats, _ := cat.ListCategories(1)
+	foodID, transportID := cats[0].ID, cats[1].ID
+
+	now := time.Now()
+	if err := sp.AddSpending(SpendingInfo{
+		UserID: 1, CategoryID: foodID, Amount: 10, Currency: "USD", Description: "old", Timestamp: now,
+	}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	rows, _ := sp.ListSpendings(1)
+	id := rows[0].ID
+
+	newAmount := 20.5
+	newCurrency := "EUR"
+	newDesc := "updated"
+	newTs := now.Add(-48 * time.Hour)
+	if err := sp.UpdateSpending(1, id, SpendingUpdate{
+		Amount:      &newAmount,
+		Currency:    &newCurrency,
+		Description: &newDesc,
+		Timestamp:   &newTs,
+		CategoryID:  &transportID,
+	}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	got, _ := sp.GetSpendingForUser(1, id)
+	if got.Amount != 20.5 || got.Currency != "EUR" || got.Description != "updated" || got.CategoryID != transportID {
+		t.Fatalf("got %+v", got)
+	}
+
+	// Cross-user.
+	if err := sp.UpdateSpending(2, id, SpendingUpdate{Amount: &newAmount}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for cross-user, got %v", err)
+	}
+
+	// Empty update is rejected.
+	if err := sp.UpdateSpending(1, id, SpendingUpdate{}); err == nil {
+		t.Fatalf("expected error on empty update")
+	}
+}
+
 func TestUserState_WriteRead(t *testing.T) {
 	_, _, us := newTestDB(t)
 
