@@ -208,6 +208,31 @@ func (s *Spending) RecentSpendings(userID int64, limit int) ([]SpendingDisplay, 
 	return rows, nil
 }
 
+// TotalSinceForCategory returns the spending sum for a single category since `since`,
+// broken down by currency. If categoryID is CategoryIDOverall (0), spendings of all
+// categories are summed.
+func (s *Spending) TotalSinceForCategory(userID, categoryID int64, since time.Time) ([]CurrencyTotal, error) {
+	var rows []CurrencyTotal
+	if categoryID == CategoryIDOverall {
+		query := `SELECT currency, COALESCE(SUM(amount), 0) AS total
+		          FROM spendings
+		          WHERE user_id = ? AND timestamp >= ?
+		          GROUP BY currency`
+		if err := s.db.Select(&rows, query, userID, since); err != nil {
+			return nil, fmt.Errorf("failed to total overall spendings for user_id=%d: %w", userID, err)
+		}
+		return rows, nil
+	}
+	query := `SELECT currency, COALESCE(SUM(amount), 0) AS total
+	          FROM spendings
+	          WHERE user_id = ? AND category_id = ? AND timestamp >= ?
+	          GROUP BY currency`
+	if err := s.db.Select(&rows, query, userID, categoryID, since); err != nil {
+		return nil, fmt.Errorf("failed to total category spendings for user_id=%d category=%d: %w", userID, categoryID, err)
+	}
+	return rows, nil
+}
+
 // TotalSince returns the sum of spendings since `since`, broken down by currency.
 func (s *Spending) TotalSince(userID int64, since time.Time) ([]CurrencyTotal, error) {
 	var rows []CurrencyTotal

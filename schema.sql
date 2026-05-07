@@ -32,3 +32,16 @@ CREATE TABLE IF NOT EXISTS spendings
 
 CREATE INDEX IF NOT EXISTS idx_spendings_user_id ON spendings (user_id);
 CREATE INDEX IF NOT EXISTS idx_spendings_user_timestamp ON spendings (user_id, timestamp);
+
+CREATE TABLE IF NOT EXISTS budgets
+(
+    id          INTEGER PRIMARY KEY,
+    user_id     INTEGER NOT NULL,
+    category_id INTEGER NOT NULL DEFAULT 0, -- 0 means overall budget for the user
+    amount      REAL    NOT NULL,
+    currency    TEXT    NOT NULL,
+    period      TEXT    NOT NULL DEFAULT 'month',
+    UNIQUE (user_id, category_id, period) ON CONFLICT REPLACE
+);
+
+CREATE INDEX IF NOT EXISTS idx_budgets_user_id ON budgets (user_id);

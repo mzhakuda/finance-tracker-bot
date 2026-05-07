@@ -9,15 +9,22 @@ import (
 
 // Callback prefixes for inline buttons. Keep them short and unambiguous.
 const (
-	CallbackCategory       = "category_"        // category selection during AddSpending
-	CallbackDeleteCategory = "delcat_"          // delete category from management view
-	CallbackDeleteSpending = "delspending_"     // delete recent spending
-	CallbackEditCategory   = "editcat_"         // start editing a category
-	CallbackEditSpending   = "editsp_"          // start editing a spending
-	CallbackEditField      = "editfield_"       // pick which spending field to edit
-	CallbackPickCategory   = "pickcat_"         // pick a category as the new value
-	CallbackNoop           = "noop"             // placeholder for non-actionable buttons
+	CallbackCategory        = "category_"    // category selection during AddSpending
+	CallbackDeleteCategory  = "delcat_"      // delete category from management view
+	CallbackDeleteSpending  = "delspending_" // delete recent spending
+	CallbackEditCategory    = "editcat_"     // start editing a category
+	CallbackEditSpending    = "editsp_"      // start editing a spending
+	CallbackEditField       = "editfield_"   // pick which spending field to edit
+	CallbackPickCategory    = "pickcat_"     // pick a category as the new value
+	CallbackBudgetCategory  = "budgetcat_"   // pick a category (or overall) for /setbudget
+	CallbackDeleteBudget    = "delbudget_"   // delete a budget from /budgets
+	CallbackNoop            = "noop"         // placeholder for non-actionable buttons
 )
+
+// BudgetOverallSentinel marks the "all categories" choice in the budget-category keyboard.
+const BudgetOverallSentinel = "overall"
+
+// Spending fields that the user can edit, used as the suffix of CallbackEditField.
 
 // Spending fields that the user can edit, used as the suffix of CallbackEditField.
 const (
@@ -83,6 +90,28 @@ func (tbk *TbKeyboardProvider) GetCategoryPickKeyboard(userID int64) tbapi.Inlin
 		label := category.Emoji + " " + category.Name
 		row := []tbapi.InlineKeyboardButton{
 			tbapi.NewInlineKeyboardButtonData(label, fmt.Sprintf("%s%d", CallbackPickCategory, category.ID)),
+		}
+		rows = append(rows, row)
+	}
+	return tbapi.NewInlineKeyboardMarkup(rows...)
+}
+
+// GetBudgetCategoryKeyboard returns an inline keyboard listing the user's categories plus
+// an "Overall" option. Callback data uses CallbackBudgetCategory + (id|"overall").
+func (tbk *TbKeyboardProvider) GetBudgetCategoryKeyboard(userID int64) tbapi.InlineKeyboardMarkup {
+	categories, err := tbk.Storage.ListCategories(userID)
+	if err != nil {
+		log.Printf("[warn] error retrieving categories: %v", err)
+		return tbapi.NewInlineKeyboardMarkup()
+	}
+	rows := make([][]tbapi.InlineKeyboardButton, 0, len(categories)+1)
+	rows = append(rows, []tbapi.InlineKeyboardButton{
+		tbapi.NewInlineKeyboardButtonData("Overall", CallbackBudgetCategory+BudgetOverallSentinel),
+	})
+	for _, category := range categories {
+		label := category.Emoji + " " + category.Name
+		row := []tbapi.InlineKeyboardButton{
+			tbapi.NewInlineKeyboardButtonData(label, fmt.Sprintf("%s%d", CallbackBudgetCategory, category.ID)),
 		}
 		rows = append(rows, row)
 	}

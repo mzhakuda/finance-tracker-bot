@@ -53,7 +53,7 @@ func (h *BotMessageHandler) HandleMessages(ctx context.Context, update tbapi.Upd
 	// Per-state input validation: catch bad input *before* it lands in FSM data, so the
 	// user can correct without dropping out of the flow.
 	switch currentState.Current() {
-	case stateAwaitingAmountInput:
+	case stateAwaitingAmountInput, stateAwaitingBudgetAmount:
 		if _, _, err := parseAmount(messageText, ""); err != nil {
 			h.sendSimple(chatID, "Invalid amount: "+err.Error()+". Try again, or /cancel.")
 			return

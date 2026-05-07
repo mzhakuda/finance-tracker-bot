@@ -18,6 +18,7 @@ type BotCallbackQueryHandler struct {
 	StateManager StateManager
 	Categories   CategoriesRepository
 	Spendings    SpendingsRepository
+	Budgets      BudgetsRepository
 	TbKeyboards  TbKeyboards
 }
 
@@ -55,6 +56,13 @@ func (h *BotCallbackQueryHandler) HandleCallbackQuery(ctx context.Context, updat
 	case strings.HasPrefix(callbackData, keyboards.CallbackPickCategory):
 		// Pass through as a value to the FSM, which is in AwaitingEditSpendingValue.
 		h.handleFSMValue(ctx, userID, callbackData)
+		return
+	case strings.HasPrefix(callbackData, keyboards.CallbackBudgetCategory):
+		// FSM is in AwaitingBudgetCategory; value goes through.
+		h.handleFSMValue(ctx, userID, callbackData)
+		return
+	case strings.HasPrefix(callbackData, keyboards.CallbackDeleteBudget):
+		h.handleDeleteBudget(userID, cb, callbackData)
 		return
 	}
 
@@ -173,6 +181,30 @@ func (h *BotCallbackQueryHandler) handlePickEditField(ctx context.Context, userI
 	}
 	if err := h.StateManager.TriggerStateChange(ctx, userID, "EditFieldSelected", field); err != nil {
 		log.Printf("[warn] error selecting edit-field for user %d: %v", userID, err)
+	}
+}
+
+func (h *BotCallbackQueryHandler) handleDeleteBudget(userID int64, cb *tbapi.CallbackQuery, payload string) {
+	idStr := strings.TrimPrefix(payload, keyboards.CallbackDeleteBudget)
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil || id <= 0 {
+		log.Printf("[warn] malformed delete-budget payload %q", payload)
+		return
+	}
+	if err := h.Budgets.DeleteBudget(userID, id); err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			h.answer(cb.ID, "Budget not found.")
+			return
+		}
+		log.Printf("[warn] failed to delete budget id=%d user=%d: %v", id, userID, err)
+		h.answer(cb.ID, "Failed to delete.")
+		return
+	}
+	h.answer(cb.ID, "Deleted.")
+	newMarkup := h.TbKeyboards.GetBudgetsManagementKeyboard(userID)
+	edit := tbapi.NewEditMessageReplyMarkup(cb.Message.Chat.ID, cb.Message.MessageID, newMarkup)
+	if _, err := h.TbAPI.Request(edit); err != nil {
+		log.Printf("[warn] failed to update budgets markup: %v", err)
 	}
 }
 

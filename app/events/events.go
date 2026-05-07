@@ -26,6 +26,8 @@ type TbKeyboards interface {
 	GetCategoryPickKeyboard(userID int64) tbapi.InlineKeyboardMarkup
 	GetCategoriesManagementKeyboard(userID int64) tbapi.InlineKeyboardMarkup
 	GetSpendingsManagementKeyboard(userID int64, limit int) tbapi.InlineKeyboardMarkup
+	GetBudgetCategoryKeyboard(userID int64) tbapi.InlineKeyboardMarkup
+	GetBudgetsManagementKeyboard(userID int64) tbapi.InlineKeyboardMarkup
 	GetSkipKeyboard() tbapi.ReplyKeyboardMarkup
 	GetDateKeyboard() tbapi.ReplyKeyboardMarkup
 	GetEditSpendingFieldKeyboard() tbapi.InlineKeyboardMarkup
@@ -53,7 +55,15 @@ type SpendingsRepository interface {
 	GetSpendingForUser(userID, spendingID int64) (*storage.SpendingInfo, error)
 	UpdateSpending(userID, spendingID int64, update storage.SpendingUpdate) error
 	TotalSince(userID int64, since time.Time) ([]storage.CurrencyTotal, error)
+	TotalSinceForCategory(userID, categoryID int64, since time.Time) ([]storage.CurrencyTotal, error)
 	DeleteSpending(userID, spendingID int64) error
+}
+
+type BudgetsRepository interface {
+	SetBudget(info storage.BudgetInfo) error
+	ListBudgets(userID int64) ([]storage.BudgetInfo, error)
+	GetBudgetForCategory(userID, categoryID int64) (*storage.BudgetInfo, error)
+	DeleteBudget(userID, budgetID int64) error
 }
 
 type CommandHandler interface {

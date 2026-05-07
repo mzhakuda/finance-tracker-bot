@@ -40,6 +40,11 @@ const (
 	stateAwaitingEditSpendingField = "AwaitingEditSpendingField"
 	stateAwaitingEditSpendingValue = "AwaitingEditSpendingValue"
 	stateSaveEditedSpending        = "SaveEditedSpending"
+
+	// Set-budget subgraph
+	stateAwaitingBudgetCategory = "AwaitingBudgetCategory"
+	stateAwaitingBudgetAmount   = "AwaitingBudgetAmount"
+	stateSaveBudget             = "SaveBudget"
 )
 
 const (
@@ -66,6 +71,9 @@ const (
 	dataKeyStartEditSpending = "StartEditSpending" // value: spending id (string)
 	dataKeyEditFieldSelected = "EditFieldSelected" // value: amount|description|date|category
 	dataKeyEditValueEntered  = "EditValueEntered"  // value: raw new field value
+
+	dataKeyBudgetCategorySelected = "BudgetCategorySelected" // value: "overall" or "<id>"
+	dataKeyBudgetAmountEntered    = "BudgetAmountEntered"    // value: raw amount string
 )
 
 // Date keyboard labels — also accepted as text input.
@@ -80,6 +88,7 @@ type BotStateManager struct {
 	UserState       UserStateRepository
 	Categories      CategoriesRepository
 	Spendings       SpendingsRepository
+	Budgets         BudgetsRepository
 	DefaultCurrency string
 
 	mu         sync.Mutex
@@ -93,6 +102,7 @@ func NewBotStateManager(
 	usRepository UserStateRepository,
 	cRepository CategoriesRepository,
 	sRepository SpendingsRepository,
+	bRepository BudgetsRepository,
 	defaultCurrency string,
 ) *BotStateManager {
 	return &BotStateManager{
@@ -101,6 +111,7 @@ func NewBotStateManager(
 		UserState:       usRepository,
 		Categories:      cRepository,
 		Spendings:       sRepository,
+		Budgets:         bRepository,
 		DefaultCurrency: defaultCurrency,
 		UserFSMs:        make(map[int64]*fsm.FSM),
 		UserValues:      make(map[int64]string),
@@ -136,6 +147,12 @@ func (sm *BotStateManager) newUserFSM(userID int64, initialState string) *fsm.FS
 			{Name: "EditValueEntered", Src: []string{stateAwaitingEditSpendingValue}, Dst: stateSaveEditedSpending},
 			{Name: "EditedSpendingSaved", Src: []string{stateSaveEditedSpending}, Dst: stateIdle},
 
+			// Set-budget subgraph
+			{Name: "StartSetBudget", Src: []string{stateIdle}, Dst: stateAwaitingBudgetCategory},
+			{Name: "BudgetCategorySelected", Src: []string{stateAwaitingBudgetCategory}, Dst: stateAwaitingBudgetAmount},
+			{Name: "BudgetAmountEntered", Src: []string{stateAwaitingBudgetAmount}, Dst: stateSaveBudget},
+			{Name: "BudgetSaved", Src: []string{stateSaveBudget}, Dst: stateIdle},
+
 			// Universal escape hatch — used by /cancel and on validation failure.
 			{Name: "ResetToIdle", Src: []string{
 				stateAwaitingCategorySelection,
@@ -152,6 +169,9 @@ func (sm *BotStateManager) newUserFSM(userID int64, initialState string) *fsm.FS
 				stateAwaitingEditSpendingField,
 				stateAwaitingEditSpendingValue,
 				stateSaveEditedSpending,
+				stateAwaitingBudgetCategory,
+				stateAwaitingBudgetAmount,
+				stateSaveBudget,
 			}, Dst: stateIdle},
 		},
 		fsm.Callbacks{
@@ -173,6 +193,10 @@ func (sm *BotStateManager) newUserFSM(userID int64, initialState string) *fsm.FS
 			"enter_" + stateAwaitingEditSpendingField: func(ctx context.Context, e *fsm.Event) { sm.promptEditSpendingField(userID) },
 			"enter_" + stateAwaitingEditSpendingValue: func(ctx context.Context, e *fsm.Event) { sm.promptEditSpendingValue(userID) },
 			"enter_" + stateSaveEditedSpending:        func(ctx context.Context, e *fsm.Event) { sm.saveEditedSpending(ctx, userID) },
+
+			"enter_" + stateAwaitingBudgetCategory: func(ctx context.Context, e *fsm.Event) { sm.promptBudgetCategory(userID) },
+			"enter_" + stateAwaitingBudgetAmount:   func(ctx context.Context, e *fsm.Event) { sm.promptBudgetAmount(userID) },
+			"enter_" + stateSaveBudget:             func(ctx context.Context, e *fsm.Event) { sm.saveBudget(ctx, userID) },
 		},
 	)
 }
@@ -199,7 +223,10 @@ func (sm *BotStateManager) getOrCreateFSM(userID int64) *fsm.FSM {
 			stateSaveEditedCategory,
 			stateAwaitingEditSpendingField,
 			stateAwaitingEditSpendingValue,
-			stateSaveEditedSpending:
+			stateSaveEditedSpending,
+			stateAwaitingBudgetCategory,
+			stateAwaitingBudgetAmount,
+			stateSaveBudget:
 			initial = persisted.State
 		}
 	}
@@ -551,6 +578,9 @@ func (sm *BotStateManager) saveSpending(ctx context.Context, userID int64) {
 	if description != "" {
 		confirmation = confirmation + " — " + description
 	}
+	if alert := sm.checkBudgetAndAlert(userID, categoryID, timestamp); alert != "" {
+		confirmation = confirmation + "\n" + alert
+	}
 	if err := sm.sendBotResponse(userID, confirmation, nil); err != nil {
 		log.Printf("[warn] error sending spending save prompt: %v", err)
 	}
@@ -767,6 +797,135 @@ func (sm *BotStateManager) saveEditedSpending(ctx context.Context, userID int64)
 	if userFSM := sm.fsmFor(userID); userFSM != nil {
 		_ = userFSM.Event(ctx, "EditedSpendingSaved")
 	}
+}
+
+// ---------- set-budget subgraph ----------
+
+func (sm *BotStateManager) promptBudgetCategory(userID int64) {
+	keyboard := sm.TbKeyboards.GetBudgetCategoryKeyboard(userID)
+	if err := sm.sendBotResponse(userID, "Pick a category for the monthly budget, or *Overall*:", &keyboard); err != nil {
+		log.Printf("[warn] error sending budget category prompt: %v", err)
+	}
+}
+
+func (sm *BotStateManager) promptBudgetAmount(userID int64) {
+	hint := fmt.Sprintf("Enter the monthly budget amount (e.g. `200` or `200 EUR`). Default currency: %s.", sm.defaultCurrency())
+	if err := sm.sendBotResponse(userID, hint, noKeyboard()); err != nil {
+		log.Printf("[warn] error sending budget amount prompt: %v", err)
+	}
+}
+
+func (sm *BotStateManager) saveBudget(ctx context.Context, userID int64) {
+	stateData, err := sm.getStateData(userID)
+	if err != nil {
+		log.Printf("[warn] error fetching state data: %v", err)
+		sm.ResetToIdle(ctx, userID)
+		return
+	}
+
+	categorySel, _ := stringField(stateData, dataKeyBudgetCategorySelected)
+	categoryID, err := parseBudgetCategoryPayload(categorySel)
+	if err != nil {
+		log.Printf("[warn] invalid budget category for user %d: %v", userID, err)
+		_ = sm.sendBotResponse(userID, "Invalid category selection.", sm.TbKeyboards.GetMainKeyboard())
+		sm.ResetToIdle(ctx, userID)
+		return
+	}
+	if categoryID != storage.CategoryIDOverall {
+		if _, err := sm.Categories.GetCategoryForUser(userID, categoryID); err != nil {
+			_ = sm.sendBotResponse(userID, "Selected category is unavailable.", sm.TbKeyboards.GetMainKeyboard())
+			sm.ResetToIdle(ctx, userID)
+			return
+		}
+	}
+
+	rawAmount, _ := stringField(stateData, dataKeyBudgetAmountEntered)
+	amount, currency, err := parseAmount(rawAmount, sm.defaultCurrency())
+	if err != nil {
+		_ = sm.sendBotResponse(userID, "Invalid amount: "+err.Error(), sm.TbKeyboards.GetMainKeyboard())
+		sm.ResetToIdle(ctx, userID)
+		return
+	}
+
+	if err := sm.Budgets.SetBudget(storage.BudgetInfo{
+		UserID:     userID,
+		CategoryID: categoryID,
+		Amount:     amount,
+		Currency:   currency,
+		Period:     storage.BudgetPeriodMonth,
+	}); err != nil {
+		log.Printf("[warn] failed to save budget for user %d: %v", userID, err)
+		_ = sm.sendBotResponse(userID, "Failed to save budget.", sm.TbKeyboards.GetMainKeyboard())
+		sm.ResetToIdle(ctx, userID)
+		return
+	}
+
+	scope := "Overall"
+	if categoryID != storage.CategoryIDOverall {
+		if cat, err := sm.Categories.GetCategoryForUser(userID, categoryID); err == nil {
+			scope = strings.TrimSpace(cat.Emoji + " " + cat.Name)
+		}
+	}
+	_ = sm.sendBotResponse(userID, fmt.Sprintf("Budget saved: %.2f %s/month for %s", amount, currency, scope), nil)
+
+	if userFSM := sm.fsmFor(userID); userFSM != nil {
+		_ = userFSM.Event(ctx, "BudgetSaved")
+	}
+}
+
+// parseBudgetCategoryPayload returns the category id for budget context.
+// Accepts the raw "budgetcat_<id|overall>" callback payload as well as the bare value.
+func parseBudgetCategoryPayload(raw string) (int64, error) {
+	stripped := strings.TrimPrefix(raw, keyboards.CallbackBudgetCategory)
+	stripped = strings.TrimSpace(stripped)
+	if stripped == "" {
+		return 0, errors.New("empty payload")
+	}
+	if stripped == keyboards.BudgetOverallSentinel {
+		return storage.CategoryIDOverall, nil
+	}
+	id, err := strconv.ParseInt(stripped, 10, 64)
+	if err != nil || id <= 0 {
+		return 0, fmt.Errorf("invalid category id %q", stripped)
+	}
+	return id, nil
+}
+
+// checkBudgetAndAlert returns a user-facing alert string when the user's spending in the
+// applicable budget's window has crossed the limit. Empty string means no alert.
+func (sm *BotStateManager) checkBudgetAndAlert(userID, categoryID int64, when time.Time) string {
+	if sm.Budgets == nil {
+		return ""
+	}
+	budget, err := sm.Budgets.GetBudgetForCategory(userID, categoryID)
+	if err != nil {
+		if !errors.Is(err, storage.ErrNotFound) {
+			log.Printf("[warn] budget lookup failed for user %d category %d: %v", userID, categoryID, err)
+		}
+		return ""
+	}
+	monthStart := time.Date(when.Year(), when.Month(), 1, 0, 0, 0, 0, when.Location())
+	totals, err := sm.Spendings.TotalSinceForCategory(userID, budget.CategoryID, monthStart)
+	if err != nil {
+		log.Printf("[warn] total computation failed for user %d: %v", userID, err)
+		return ""
+	}
+	for _, t := range totals {
+		if t.Currency != budget.Currency {
+			continue
+		}
+		if t.Total >= budget.Amount {
+			scope := "overall"
+			if budget.CategoryID != storage.CategoryIDOverall {
+				if cat, err := sm.Categories.GetCategoryForUser(userID, budget.CategoryID); err == nil {
+					scope = strings.TrimSpace(cat.Emoji + " " + cat.Name)
+				}
+			}
+			return fmt.Sprintf("⚠️ Budget exceeded for %s: %.2f / %.2f %s this month.",
+				scope, t.Total, budget.Amount, budget.Currency)
+		}
+	}
+	return ""
 }
 
 // parsePickCategoryPayload extracts the category id from a "pickcat_<id>" callback payload
