@@ -24,8 +24,8 @@ type CategoryInfo struct {
 func NewCategory(db *sqlx.DB) (*Category, error) {
 	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS categories (
 		id INTEGER PRIMARY KEY,
-		user_id INTEGER UNIQUE,
-		name TEXT,
+		user_id INTEGER NOT NULL,
+		name TEXT NOT NULL,
 		emoji TEXT,
 		UNIQUE(user_id, name) ON CONFLICT REPLACE
 	)`)

@@ -27,16 +27,22 @@ type SpendingInfo struct {
 func NewSpending(db *sqlx.DB) (*Spending, error) {
 	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS spendings (
 		id INTEGER PRIMARY KEY,
-		user_id INTEGER UNIQUE,
-		category_id INTEGER,
+		user_id INTEGER NOT NULL,
+		category_id INTEGER NOT NULL,
 		amount REAL NOT NULL,
 		description TEXT,
 		timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-		FOREIGN KEY (user_id) REFERENCES user_states(user_id),
 		FOREIGN KEY (category_id) REFERENCES categories(id)
 	)`)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create spendings table: %w", err)
+	}
+
+	if _, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_spendings_user_id ON spendings(user_id)`); err != nil {
+		return nil, fmt.Errorf("failed to create index on user_id: %w", err)
+	}
+	if _, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_spendings_user_timestamp ON spendings(user_id, timestamp)`); err != nil {
+		return nil, fmt.Errorf("failed to create index on user_id, timestamp: %w", err)
 	}
 
 	return &Spending{db: db}, nil
