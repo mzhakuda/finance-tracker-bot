@@ -40,13 +40,16 @@ func main() {
 }
 
 func execute(ctx context.Context) error {
-	// Load .env if present, but don't fail when it's not — env vars may already be set.
 	if err := godotenv.Load(); err != nil && !os.IsNotExist(err) {
 		log.Printf("[info] no .env file loaded: %v", err)
 	}
 
 	dataFilePath := os.Getenv("DATA_FILE_PATH")
 	telegramToken := os.Getenv("TELEGRAM_TOKEN")
+	defaultCurrency := os.Getenv("DEFAULT_CURRENCY")
+	if defaultCurrency == "" {
+		defaultCurrency = "USD"
+	}
 	if dataFilePath == "" {
 		return errors.New("DATA_FILE_PATH is required")
 	}
@@ -85,22 +88,29 @@ func execute(ctx context.Context) error {
 	}
 	tbAPI.Debug = false
 
-	botKeyboardProvider := keyboards.NewTbKeyboardProvider(categoryDB)
-	botStateManager := events.NewBotStateManager(tbAPI, botKeyboardProvider, userStateDB, categoryDB, spendingDB)
+	botKeyboardProvider := keyboards.NewTbKeyboardProvider(categoryDB, spendingDB)
+	botStateManager := events.NewBotStateManager(tbAPI, botKeyboardProvider, userStateDB, categoryDB, spendingDB, defaultCurrency)
 
 	commandHandler := &events.BotCommandHandler{
 		TbAPI:        tbAPI,
 		TbKeyboards:  botKeyboardProvider,
 		StateManager: botStateManager,
+		Categories:   categoryDB,
+		Spendings:    spendingDB,
 	}
 
 	messageHandler := &events.BotMessageHandler{
 		TbAPI:        tbAPI,
 		StateManager: botStateManager,
+		TbKeyboards:  botKeyboardProvider,
 	}
 
 	callbackQueryHandler := &events.BotCallbackQueryHandler{
+		TbAPI:        tbAPI,
 		StateManager: botStateManager,
+		Categories:   categoryDB,
+		Spendings:    spendingDB,
+		TbKeyboards:  botKeyboardProvider,
 	}
 
 	listener := events.TelegramListener{

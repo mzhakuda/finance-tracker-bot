@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS spendings
     user_id     INTEGER NOT NULL,
     category_id INTEGER NOT NULL,
     amount      REAL    NOT NULL,
-    description TEXT,
+    currency    TEXT    NOT NULL DEFAULT '',
+    description TEXT    NOT NULL DEFAULT '',
     timestamp   DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (category_id) REFERENCES categories (id)
 );
